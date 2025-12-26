@@ -41,8 +41,8 @@ dependencies = [
     "accelerate>=1.2.0",  # For optimized model loading
     "safetensors>=0.4.0",  # Safe model serialization
 
-    # Audio codec (Phase 3) - Optional for compression
-    # "opuslib>=3.0.0; platform_system!='Windows'",  # Opus codec (Linux/macOS only) - commented out for MVP
+    # Audio codec (Phase 3)
+    "opuslib>=3.2.0; platform_system!='Windows'",  # Opus codec (Linux/macOS only)
 
     # Utilities
     "python-dotenv>=1.0.1",
@@ -69,11 +69,10 @@ dev = [
     "jupyter>=1.0.0",
 ]
 
-# CUDA-specific dependencies (Linux with NVIDIA GPU)
-# Note: Install CUDA-enabled PyTorch separately using:
-# uv pip install torch==2.5.0+cu121 torchaudio==2.5.0+cu121 --index-url https://download.pytorch.org/whl/cu121
+# CUDA-specific dependencies (Linux with NVIDIA GPU) - will be added when GPU support is needed
 cuda = [
-    # Placeholder for CUDA dependencies (requires special index)
+    "torch>=2.1.0+cu121",
+    "torchaudio>=2.1.0+cu121",
 ]
 
 [project.urls]
@@ -85,10 +84,6 @@ Issues = "https://github.com/yourusername/auralis/issues"
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-include = ["server*", "composition*", "tests*"]
-exclude = ["specs*", "client*", "deployment*", "docs*", ".specify*", ".claude*", ".opencode*", "auralis*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

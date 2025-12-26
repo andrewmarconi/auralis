@@ -20,3 +20,10 @@
 - **Naming:** Use descriptive names for audio/composition functions
 - **GPU:** Prioritize Metal/CUDA acceleration where possible
 - **Error Handling:** Focus on seamless audio streaming over exhaustive error recovery
+
+## Active Technologies
+- Python 3.12+ via uv + FastAPI, PyTorch, torchsynth, asyncio, WebSockets (001-phase1-mvp)
+- Audio ring buffers, temporary in-memory storage (001-phase1-mvp)
+
+## Recent Changes
+- 001-phase1-mvp: Added Python 3.12+ via uv + FastAPI, PyTorch, torchsynth, asyncio, WebSockets

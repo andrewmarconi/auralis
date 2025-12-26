@@ -21,6 +21,7 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
 
         // Statistics
         this.underrunCount = 0;
+        this.frameCount = 0;
 
         // Listen for audio data from main thread
         this.port.onmessage = (event) => {
@@ -37,7 +38,7 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
             // data.samples is Float32Array of stereo samples (LRLRLR...)
             const samples = data.samples;
 
-            // Write to ring buffer
+            // Write to ring buffer (samples are already interleaved LRLR...)
             for (let i = 0; i < samples.length; i++) {
                 const bufferIndex = (this.writeIndex + i) % this.internalBuffer.length;
                 this.internalBuffer[bufferIndex] = samples[i];
@@ -80,32 +81,39 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
         let readIndexFloat = this.readIndex;
 
         for (let i = 0; i < framesToRender; i++) {
-            const readPos = Math.floor(readIndexFloat) % this.internalBuffer.length;
+            // Calculate how many samples are available
+            const available = (this.writeIndex - Math.floor(readIndexFloat) + this.internalBuffer.length) % this.internalBuffer.length;
 
-            // Check for buffer underrun
-            if (readPos === this.writeIndex) {
+            // Check for buffer underrun (need at least 2 samples for stereo)
+            if (available < 2) {
                 // Underrun - output silence
                 outputL[i] = 0;
                 outputR[i] = 0;
                 this.underrunCount++;
-            } else {
-                // Read stereo sample (interleaved LRLR...)
-                const sampleL = this.internalBuffer[readPos];
-                const sampleR = this.internalBuffer[(readPos + 1) % this.internalBuffer.length];
-
-                outputL[i] = sampleL;
-                outputR[i] = sampleR;
-
-                // Advance read position by 2 (stereo) * playback rate
-                readIndexFloat += 2 * this.playbackRate;
+                continue;
             }
+
+            const readPos = Math.floor(readIndexFloat) % this.internalBuffer.length;
+
+            // Read stereo sample (interleaved LRLR...)
+            const sampleL = this.internalBuffer[readPos];
+            const sampleR = this.internalBuffer[(readPos + 1) % this.internalBuffer.length];
+
+            outputL[i] = sampleL;
+            outputR[i] = sampleR;
+
+            // Advance read position by 2 (stereo) * playback rate
+            readIndexFloat += 2 * this.playbackRate;
         }
 
         // Update read index
         this.readIndex = Math.floor(readIndexFloat) % this.internalBuffer.length;
 
+        // Increment frame counter
+        this.frameCount += framesToRender;
+
         // Send status to main thread (throttled)
-        if (currentFrame % 4800 === 0) { // Every ~100ms at 48kHz
+        if (this.frameCount % 4800 === 0) { // Every ~100ms at 48kHz
             this.port.postMessage({
                 type: 'status',
                 bufferDepthMs: bufferDepthMs,

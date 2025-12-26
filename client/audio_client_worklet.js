@@ -248,33 +248,65 @@ class AuralisAudioClient {
     }
 }
 
-// Usage example
-/*
-const client = new AuralisAudioClient('ws://localhost:8000/ws/stream');
+/**
+ * AudioStreamClient - High-level wrapper for index.html integration
+ */
+export class AudioStreamClient {
+    constructor(wsUrl) {
+        this.client = new AuralisAudioClient(wsUrl);
+        this.statusInterval = null;
+        this.heartbeatInterval = null;
 
-// Connect (requires user gesture due to autoplay policy)
-document.getElementById('connectBtn').addEventListener('click', async () => {
-    try {
-        await client.connect();
-        console.log('Connected!');
+        // Callbacks
+        this.onStatusUpdate = null;
+        this.onError = null;
+    }
+
+    async connect() {
+        try {
+            await this.client.connect();
+        } catch (error) {
+            if (this.onError) {
+                this.onError(error);
+            }
+            throw error;
+        }
+    }
+
+    async start() {
+        // Start status updates
+        this.statusInterval = setInterval(() => {
+            const status = this.client.getStatus();
+            if (this.onStatusUpdate) {
+                this.onStatusUpdate({
+                    connected: status.isConnected,
+                    bufferDepthMs: status.bufferDepthMs,
+                    latencyMs: null, // TODO: Calculate from heartbeat
+                    chunksReceived: status.chunksReceived,
+                    errorRate: status.errorRate,
+                });
+            }
+        }, 500);
 
         // Start heartbeat
-        setInterval(() => client.sendHeartbeat(), 30000);
-
-        // Display status
-        setInterval(() => {
-            const status = client.getStatus();
-            console.log('Status:', status);
-            document.getElementById('bufferDepth').textContent = status.bufferDepthMs.toFixed(0);
-        }, 1000);
-
-    } catch (error) {
-        console.error('Connection failed:', error);
+        this.heartbeatInterval = setInterval(() => {
+            this.client.sendHeartbeat();
+        }, 30000);
     }
-});
 
-// Control updates
-document.getElementById('keySelect').addEventListener('change', (e) => {
-    client.setControl({ key: e.target.value });
-});
-*/
+    stop() {
+        if (this.statusInterval) {
+            clearInterval(this.statusInterval);
+            this.statusInterval = null;
+        }
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+        this.client.disconnect();
+    }
+
+    updateParameters(params) {
+        this.client.setControl(params);
+    }
+}
