@@ -51,9 +51,7 @@ class MelodyPhrase:
         self.bars = bars
         self.scale_intervals = scale_intervals
 
-    def to_sample_events(
-        self, sample_rate: int = 44100
-    ) -> List[Tuple[int, int, float, float]]:
+    def to_sample_events(self, sample_rate: int = 44100) -> List[Tuple[int, int, float, float]]:
         """
         Convert timing to sample-accurate events.
 
@@ -115,6 +113,7 @@ class ConstrainedMelodyGenerator:
         duration_sec: float,
         bpm: int = 70,
         intensity: float = 0.5,
+        complexity: float = 0.5,
     ) -> MelodyPhrase:
         """
         Generate melody for chord progression.
@@ -124,11 +123,24 @@ class ConstrainedMelodyGenerator:
             duration_sec: Total phrase duration in seconds
             bpm: Tempo for note density calculation
             intensity: Control density and range (0.0-1.0)
+            complexity: Control harmonic adherence vs chromaticism (0.0-1.0)
 
         Returns:
             MelodyPhrase with generated notes
         """
         notes = []
+
+        # Adjust probabilities based on complexity
+        # Low complexity: more chord tones, high: more chromatic
+        chord_tone_prob = 0.7 - complexity * 0.4
+        scale_tone_prob = 0.25 + complexity * 0.2
+        chromatic_prob = 0.05 + complexity * 0.2
+
+        # Normalize
+        total = chord_tone_prob + scale_tone_prob + chromatic_prob
+        self.chord_tone_prob = chord_tone_prob / total
+        self.scale_tone_prob = scale_tone_prob / total
+        self.chromatic_prob = chromatic_prob / total
 
         # Calculate note density based on intensity
         # Low intensity: ~1 note per bar
@@ -139,14 +151,10 @@ class ConstrainedMelodyGenerator:
         current_time = 0.0
         while current_time < duration_sec:
             # Find active chord at current time
-            active_chord = self._get_active_chord(
-                current_time, chord_progression, duration_sec
-            )
+            active_chord = self._get_active_chord(current_time, chord_progression, duration_sec)
 
             # Generate note pitch constrained to harmony
-            pitch_midi = self._generate_constrained_pitch(
-                active_chord, intensity
-            )
+            pitch_midi = self._generate_constrained_pitch(active_chord, intensity)
 
             # Note duration (ambient = longer notes)
             duration = random.uniform(0.25, 1.0)  # 0.25-1.0 seconds
@@ -189,9 +197,7 @@ class ConstrainedMelodyGenerator:
             return chord_progression[0][2]
         return "i"  # Default to tonic
 
-    def _generate_constrained_pitch(
-        self, chord_symbol: str, intensity: float
-    ) -> int:
+    def _generate_constrained_pitch(self, chord_symbol: str, intensity: float) -> int:
         """
         Generate MIDI pitch constrained to chord harmony.
 

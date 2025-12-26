@@ -64,14 +64,16 @@ class AudioChunk:
 
     def to_json(self) -> str:
         """Serialize chunk to JSON for WebSocket transmission."""
-        return json.dumps({
-            "type": "audio",
-            "data": self.data,
-            "timestamp": self.timestamp,
-            "sequence": self.sequence,
-            "sample_rate": self.sample_rate,
-            "format": self.format,
-        })
+        return json.dumps(
+            {
+                "type": "audio",
+                "data": self.data,
+                "timestamp": self.timestamp,
+                "sequence": self.sequence,
+                "sample_rate": self.sample_rate,
+                "format": self.format,
+            }
+        )
 
 
 class StreamingServer:
@@ -106,12 +108,14 @@ class StreamingServer:
 
         try:
             # Send initial connection confirmation
-            await websocket.send_json({
-                "type": "connected",
-                "message": "Audio streaming ready",
-                "sample_rate": self.ring_buffer.sample_rate,
-                "chunk_size_ms": 100,
-            })
+            await websocket.send_json(
+                {
+                    "type": "connected",
+                    "message": "Audio streaming ready",
+                    "sample_rate": self.ring_buffer.sample_rate,
+                    "chunk_size_ms": 100,
+                }
+            )
 
             # Stream audio chunks
             await self._stream_audio(websocket)
@@ -145,10 +149,12 @@ class StreamingServer:
                 audio_data = np.zeros((2, self.ring_buffer.chunk_size), dtype=np.float32)
 
                 # Notify client of underflow
-                await websocket.send_json({
-                    "type": "warning",
-                    "message": "Buffer underflow - temporary silence",
-                })
+                await websocket.send_json(
+                    {
+                        "type": "warning",
+                        "message": "Buffer underflow - temporary silence",
+                    }
+                )
 
             # Create and send audio chunk
             chunk = AudioChunk(audio_data, self.sequence_counter)
@@ -166,9 +172,7 @@ class StreamingServer:
             except asyncio.TimeoutError:
                 pass  # No control message - continue streaming
 
-    async def _handle_control_message(
-        self, websocket: WebSocket, message: str
-    ) -> None:
+    async def _handle_control_message(self, websocket: WebSocket, message: str) -> None:
         """
         Handle control messages from client.
 
@@ -187,10 +191,19 @@ class StreamingServer:
             elif msg_type == "buffer_status":
                 # Report buffer depth
                 depth_ms = self.ring_buffer.get_buffer_depth_ms()
-                await websocket.send_json({
-                    "type": "buffer_status",
-                    "depth_ms": depth_ms,
-                })
+                await websocket.send_json(
+                    {
+                        "type": "buffer_status",
+                        "depth_ms": depth_ms,
+                    }
+                )
+
+            elif msg_type == "control":
+                # Handle parameter updates from client
+                # Parameters are updated via REST API, so acknowledge but don't change
+                await websocket.send_json(
+                    {"type": "control_ack", "message": "Parameters should be updated via REST API"}
+                )
 
             else:
                 logger.warning(f"Unknown control message type: {msg_type}")
