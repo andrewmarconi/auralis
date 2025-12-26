@@ -17,14 +17,17 @@ AMBIENT_CHORDS = ["i", "iv", "V", "VI", "III"]
 # Ambient-biased transition matrix (probabilities)
 # Rows: current chord, Columns: next chord
 # Designed for slow, contemplative progressions
-AMBIENT_TRANSITION_MATRIX = np.array([
-    # i    iv    V    VI   III
-    [0.2, 0.3, 0.1, 0.3, 0.1],  # from i (tonic)
-    [0.4, 0.1, 0.2, 0.2, 0.1],  # from iv (subdominant)
-    [0.5, 0.1, 0.1, 0.2, 0.1],  # from V (dominant)
-    [0.3, 0.2, 0.1, 0.2, 0.2],  # from VI
-    [0.4, 0.2, 0.1, 0.2, 0.1],  # from III
-], dtype=np.float32)
+AMBIENT_TRANSITION_MATRIX = np.array(
+    [
+        # i    iv    V    VI   III
+        [0.2, 0.3, 0.1, 0.3, 0.1],  # from i (tonic)
+        [0.4, 0.1, 0.2, 0.2, 0.1],  # from iv (subdominant)
+        [0.5, 0.1, 0.1, 0.2, 0.1],  # from V (dominant)
+        [0.3, 0.2, 0.1, 0.2, 0.2],  # from VI
+        [0.4, 0.2, 0.1, 0.2, 0.1],  # from III
+    ],
+    dtype=np.float32,
+)
 
 
 class ChordProgression:
@@ -55,9 +58,7 @@ class ChordProgression:
         self.length_bars = length_bars
         self.root_midi = root_midi
 
-    def to_midi_events(
-        self, bpm: int = 70, sample_rate: int = 44100
-    ) -> List[Tuple[int, int, str]]:
+    def to_midi_events(self, bpm: int = 70, sample_rate: int = 44100) -> List[Tuple[int, int, str]]:
         """
         Convert chord progression to MIDI event list with sample-accurate timing.
 
@@ -116,14 +117,15 @@ class ChordProgressionGenerator:
             raise ValueError("Transition matrix rows must sum to 1.0")
 
     def generate_progression(
-        self, length_bars: int = 8, root_midi: int = 57
+        self, length_bars: int = 8, root_midi: int = 57, variety: float = 0.5
     ) -> ChordProgression:
         """
-        Generate chord progression using Markov chain.
+        Generate chord progression using enhanced Markov chain.
 
         Args:
             length_bars: Number of bars to generate
             root_midi: MIDI note for key root
+            variety: Float 0.0-1.0, higher values increase harmonic variety
 
         Returns:
             ChordProgression instance with generated chords
@@ -140,7 +142,14 @@ class ChordProgressionGenerator:
         # Generate remaining chords
         for _ in range(length_bars - 1):
             # Get transition probabilities for current chord
-            probabilities = self.transition_matrix[current_idx]
+            base_probabilities = self.transition_matrix[current_idx]
+
+            # Blend with uniform distribution based on variety
+            uniform_prob = np.ones(self.num_chords) / self.num_chords
+            probabilities = (1 - variety) * base_probabilities + variety * uniform_prob
+
+            # Normalize
+            probabilities = probabilities / probabilities.sum()
 
             # Sample next chord
             next_idx = np.random.choice(self.num_chords, p=probabilities)
@@ -150,6 +159,32 @@ class ChordProgressionGenerator:
             current_idx = next_idx
 
         return ChordProgression(chords, length_bars, root_midi)
+
+    def calculate_entropy(self, variety: float = 0.5) -> float:
+        """
+        Calculate normalized Shannon entropy of transition probabilities.
+
+        Args:
+            variety: Variety parameter used in generation
+
+        Returns:
+            Normalized entropy score (0-1, higher = more variety)
+        """
+        total_entropy = 0.0
+
+        for i in range(self.num_chords):
+            base_probabilities = self.transition_matrix[i]
+            uniform_prob = np.ones(self.num_chords) / self.num_chords
+            probabilities = (1 - variety) * base_probabilities + variety * uniform_prob
+            probabilities = probabilities / probabilities.sum()
+
+            # Calculate entropy for this row
+            entropy = -np.sum(probabilities * np.log2(probabilities + 1e-10))
+            total_entropy += entropy
+
+        # Normalize by maximum possible entropy
+        max_entropy = self.num_chords * np.log2(self.num_chords)
+        return total_entropy / max_entropy if max_entropy > 0 else 0.0
 
     def generate_with_constraints(
         self,

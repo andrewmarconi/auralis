@@ -7,7 +7,7 @@ Main application entrypoint for real-time ambient music streaming.
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +28,15 @@ class SynthesisParameters(BaseModel):
     key: str = Field(default="A", description="Musical key")
     bpm: int = Field(default=70, ge=40, le=120, description="Tempo in BPM")
     intensity: float = Field(default=0.5, ge=0.0, le=1.0, description="Generation intensity")
+    melody_complexity: float = Field(
+        default=0.5, ge=0.0, le=1.0, description="Controls melodic pattern intricacy"
+    )
+    chord_progression_variety: float = Field(
+        default=0.5, ge=0.0, le=1.0, description="Controls harmonic exploration range"
+    )
+    harmonic_density: float = Field(
+        default=0.5, ge=0.0, le=1.0, description="Controls layered chord richness"
+    )
 
 
 class PerformanceMetrics(BaseModel):
@@ -56,6 +65,46 @@ class ApplicationState:
 
 
 app_state = ApplicationState()
+
+
+# Parameter Validation and Adjustment
+def validate_parameters(params: SynthesisParameters) -> List[str]:
+    """Validate parameter combinations and return warning messages."""
+    warnings = []
+
+    # Check for potential conflicts
+    if params.melody_complexity > 0.8 and params.intensity < 0.3:
+        warnings.append("High melody complexity with low intensity may reduce perceived musicality")
+
+    if params.harmonic_density > 0.8 and params.chord_progression_variety < 0.3:
+        warnings.append(
+            "High harmonic density with low progression variety may create repetitive harmonies"
+        )
+
+    return warnings
+
+
+def adjust_parameters_for_performance(
+    params: SynthesisParameters, target_load: float = 0.8
+) -> SynthesisParameters:
+    """Automatically adjust parameters if they exceed performance capacity."""
+    # Simple scaling based on complexity
+    complexity_score = (
+        params.melody_complexity + params.chord_progression_variety + params.harmonic_density
+    ) / 3.0
+
+    if complexity_score > target_load:
+        scale_factor = target_load / complexity_score
+        return SynthesisParameters(
+            key=params.key,
+            bpm=params.bpm,
+            intensity=params.intensity,
+            melody_complexity=params.melody_complexity * scale_factor,
+            chord_progression_variety=params.chord_progression_variety * scale_factor,
+            harmonic_density=params.harmonic_density * scale_factor,
+        )
+
+    return params
 
 
 # Lifecycle Management
@@ -142,7 +191,9 @@ async def synthesis_loop():
             duration_sec = 1.0
 
             # Generate chord progression (for musical context)
-            chord_progression = chord_gen.generate_progression(length_bars=2)
+            chord_progression = chord_gen.generate_progression(
+                length_bars=2, variety=app_state.parameters.chord_progression_variety
+            )
             chord_events = chord_progression.to_midi_events(bpm=bpm)
 
             # Generate melody constrained to chords
@@ -151,6 +202,7 @@ async def synthesis_loop():
                 duration_sec=duration_sec,
                 bpm=bpm,
                 intensity=intensity,
+                complexity=app_state.parameters.melody_complexity,
             )
             melody_events = melody_phrase.to_sample_events()
 
@@ -189,6 +241,7 @@ async def synthesis_loop():
         except Exception as e:
             logger.error(f"Synthesis loop error: {e}")
             import traceback
+
             traceback.print_exc()
             await asyncio.sleep(1.0)  # Prevent tight error loop
 
@@ -250,23 +303,37 @@ async def update_control(params: SynthesisParameters):
     Update synthesis parameters.
 
     Args:
-        params: Synthesis configuration (key, BPM, intensity)
+        params: Synthesis configuration (key, BPM, intensity, melody_complexity, chord_progression_variety, harmonic_density)
 
     Returns:
-        Confirmation message with updated parameters
+        Confirmation message with updated parameters and any warnings
     """
-    app_state.parameters = params
-    logger.info(f"Parameters updated: {params.model_dump()}")
+    # Adjust parameters for performance if needed
+    adjusted_params = adjust_parameters_for_performance(params)
+
+    # Validate and get warnings
+    warnings = validate_parameters(adjusted_params)
+
+    app_state.parameters = adjusted_params
+
+    if warnings:
+        logger.warning(f"Parameter warnings: {warnings}")
+
+    logger.info(f"Parameters updated: {adjusted_params.model_dump()}")
 
     # Broadcast to all connected clients
-    await app_state.streaming_server.broadcast_status({
-        "message": "Parameters updated",
-        "parameters": params.model_dump(),
-    })
+    await app_state.streaming_server.broadcast_status(
+        {
+            "message": "Parameters updated",
+            "parameters": adjusted_params.model_dump(),
+            "warnings": warnings,
+        }
+    )
 
     return {
         "message": "Parameters updated successfully",
-        "parameters": params.model_dump(),
+        "parameters": adjusted_params.model_dump(),
+        "warnings": warnings,
     }
 
 

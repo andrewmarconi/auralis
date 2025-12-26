@@ -19,35 +19,30 @@ classifiers = [
 
 dependencies = [
     # Core web framework and async support
-    "fastapi>=0.127.0,<0.128",  # Latest stable as of Dec 2025
-    "uvicorn[standard]>=0.40.0,<0.41",  # Latest with WebSocket improvements
+    "fastapi>=0.127.0,<0.128", # Latest stable as of Dec 2025
+    "uvicorn[standard]>=0.40.0,<0.41", # Latest with WebSocket improvements
     "websockets>=13.0,<14.0",
     "python-multipart>=0.0.18",
-    "pydantic>=2.12.0,<3.0",  # Latest v2 with Python 3.14 support
-    "pydantic-settings>=2.6.0",  # For settings management
-
+    "pydantic>=2.12.0,<3.0", # Latest v2 with Python 3.14 support
+    "pydantic-settings>=2.6.0", # For settings management
     # Audio synthesis and processing
-    "torch>=2.5.0,<3.0",  # Latest PyTorch 2.x with MPS & CUDA support
+    "torch>=2.5.0,<3.0", # Latest PyTorch 2.x with MPS & CUDA support
     "torchaudio>=2.5.0,<3.0",
-    "torchsynth>=1.0.2",  # Latest available (inactive project, pinned)
-    "numpy>=1.26.0,<3.0",  # NumPy 2.x compatible
+    "torchsynth>=1.0.2", # Latest available (inactive project, pinned)
+    "numpy>=1.26.0,<3.0", # NumPy 2.x compatible
     "scipy>=1.14.0,<2.0",
-
     # Advanced audio processing
-    "pedalboard>=0.9.19",  # Spotify's library, Python 3.10-3.14 support
-
+    "pedalboard>=0.9.19", # Spotify's library, Python 3.10-3.14 support
     # Machine learning for melody generation (Phase 2)
-    "transformers>=4.57.0,<5.0",  # Latest stable HuggingFace
-    "accelerate>=1.2.0",  # For optimized model loading
-    "safetensors>=0.4.0",  # Safe model serialization
-
+    "transformers>=4.57.0,<5.0", # Latest stable HuggingFace
+    "accelerate>=1.2.0", # For optimized model loading
+    "safetensors>=0.4.0", # Safe model serialization
     # Audio codec (Phase 3) - Optional for compression
     # "opuslib>=3.0.0; platform_system!='Windows'",  # Opus codec (Linux/macOS only) - commented out for MVP
-
     # Utilities
     "python-dotenv>=1.0.1",
-    "loguru>=0.7.3",  # Enhanced structured logging
-    "httpx>=0.28.0",  # For async HTTP (testing & potential API calls)
+    "loguru>=0.7.3", # Enhanced structured logging
+    "httpx>=0.28.0", # For async HTTP (testing & potential API calls)
 ]
 
 [project.optional-dependencies]

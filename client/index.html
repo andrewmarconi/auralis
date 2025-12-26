@@ -146,12 +146,25 @@
             font-weight: 600;
         }
 
-        .error {
-            background: rgba(255, 0, 0, 0.2);
-            border: 1px solid rgba(255, 0, 0, 0.5);
-            border-radius: 8px;
-            padding: 15px;
+        .warnings {
             margin-top: 20px;
+            padding: 10px;
+            background: rgba(255, 255, 0, 0.2);
+            border-radius: 8px;
+            text-align: center;
+            display: none;
+        }
+
+        .warnings.visible {
+            display: block;
+        }
+
+        .error {
+            margin-top: 20px;
+            padding: 10px;
+            background: rgba(255, 0, 0, 0.2);
+            border-radius: 8px;
+            text-align: center;
             display: none;
         }
 
@@ -187,6 +200,21 @@
                 <input type="range" id="intensitySlider" min="0" max="1" step="0.1" value="0.5">
             </div>
 
+            <div class="control-group">
+                <label for="melodyComplexitySlider">Melody Complexity: <span id="melodyComplexityValue">0.5</span></label>
+                <input type="range" id="melodyComplexitySlider" min="0" max="1" step="0.1" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label for="chordProgressionVarietySlider">Chord Progression Variety: <span id="chordProgressionVarietyValue">0.5</span></label>
+                <input type="range" id="chordProgressionVarietySlider" min="0" max="1" step="0.1" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label for="harmonicDensitySlider">Harmonic Density: <span id="harmonicDensityValue">0.5</span></label>
+                <input type="range" id="harmonicDensitySlider" min="0" max="1" step="0.1" value="0.5">
+            </div>
+
             <button id="playButton">Start Streaming</button>
         </div>
 
@@ -205,6 +233,8 @@
             </div>
         </div>
 
+        <div class="warnings" id="warningsMessage"></div>
+
         <div class="error" id="errorMessage"></div>
     </div>
 
@@ -218,11 +248,18 @@
         const keySelect = document.getElementById('keySelect');
         const bpmSlider = document.getElementById('bpmSlider');
         const intensitySlider = document.getElementById('intensitySlider');
+        const melodyComplexitySlider = document.getElementById('melodyComplexitySlider');
+        const chordProgressionVarietySlider = document.getElementById('chordProgressionVarietySlider');
+        const harmonicDensitySlider = document.getElementById('harmonicDensitySlider');
         const bpmValue = document.getElementById('bpmValue');
         const intensityValue = document.getElementById('intensityValue');
+        const melodyComplexityValue = document.getElementById('melodyComplexityValue');
+        const chordProgressionVarietyValue = document.getElementById('chordProgressionVarietyValue');
+        const harmonicDensityValue = document.getElementById('harmonicDensityValue');
         const connectionStatus = document.getElementById('connectionStatus');
         const bufferStatus = document.getElementById('bufferStatus');
         const latencyStatus = document.getElementById('latencyStatus');
+        const warningsMessage = document.getElementById('warningsMessage');
         const errorMessage = document.getElementById('errorMessage');
 
         // Update slider values
@@ -232,6 +269,18 @@
 
         intensitySlider.addEventListener('input', (e) => {
             intensityValue.textContent = e.target.value;
+        });
+
+        melodyComplexitySlider.addEventListener('input', (e) => {
+            melodyComplexityValue.textContent = e.target.value;
+        });
+
+        chordProgressionVarietySlider.addEventListener('input', (e) => {
+            chordProgressionVarietyValue.textContent = e.target.value;
+        });
+
+        harmonicDensitySlider.addEventListener('input', (e) => {
+            harmonicDensityValue.textContent = e.target.value;
         });
 
         // Play/Stop button
@@ -256,6 +305,9 @@
                         }
                         if (status.latencyMs !== undefined) {
                             latencyStatus.textContent = `${Math.round(status.latencyMs)}ms`;
+                        }
+                        if (status.warnings && status.warnings.length > 0) {
+                            showWarnings(status.warnings.join(', '));
                         }
                     };
 
@@ -302,6 +354,24 @@
             }
         });
 
+        melodyComplexitySlider.addEventListener('change', (e) => {
+            if (audioClient && isPlaying) {
+                audioClient.updateParameters({ melody_complexity: parseFloat(e.target.value) });
+            }
+        });
+
+        chordProgressionVarietySlider.addEventListener('change', (e) => {
+            if (audioClient && isPlaying) {
+                audioClient.updateParameters({ chord_progression_variety: parseFloat(e.target.value) });
+            }
+        });
+
+        harmonicDensitySlider.addEventListener('change', (e) => {
+            if (audioClient && isPlaying) {
+                audioClient.updateParameters({ harmonic_density: parseFloat(e.target.value) });
+            }
+        });
+
         function stopStreaming() {
             if (audioClient) {
                 audioClient.stop();
@@ -312,6 +382,14 @@
             connectionStatus.textContent = 'Disconnected';
             bufferStatus.textContent = '0ms';
             latencyStatus.textContent = '-';
+        }
+
+        function showWarnings(message) {
+            warningsMessage.textContent = message;
+            warningsMessage.classList.add('visible');
+            setTimeout(() => {
+                warningsMessage.classList.remove('visible');
+            }, 5000);
         }
 
         function showError(message) {
