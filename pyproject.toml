@@ -1,0 +1,108 @@
+[project]
+name = "Auralis"
+version = "0.1.0"
+description = "Real-time Generative Ambient Music in Python"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Andrew Marconi", email = "andrew@example.com"}
+]
+keywords = ["generative-music", "ambient", "audio-synthesis", "real-time", "streaming"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Sound Synthesis",
+]
+
+dependencies = [
+    # Core web framework and async support
+    "fastapi>=0.127.0,<0.128",  # Latest stable as of Dec 2025
+    "uvicorn[standard]>=0.40.0,<0.41",  # Latest with WebSocket improvements
+    "websockets>=13.0,<14.0",
+    "python-multipart>=0.0.18",
+    "pydantic>=2.12.0,<3.0",  # Latest v2 with Python 3.14 support
+    "pydantic-settings>=2.6.0",  # For settings management
+
+    # Audio synthesis and processing
+    "torch>=2.5.0,<3.0",  # Latest PyTorch 2.x with MPS & CUDA support
+    "torchaudio>=2.5.0,<3.0",
+    "torchsynth>=1.0.2",  # Latest available (inactive project, pinned)
+    "numpy>=1.26.0,<3.0",  # NumPy 2.x compatible
+    "scipy>=1.14.0,<2.0",
+
+    # Advanced audio processing
+    "pedalboard>=0.9.19",  # Spotify's library, Python 3.10-3.14 support
+
+    # Machine learning for melody generation (Phase 2)
+    "transformers>=4.57.0,<5.0",  # Latest stable HuggingFace
+    "accelerate>=1.2.0",  # For optimized model loading
+    "safetensors>=0.4.0",  # Safe model serialization
+
+    # Audio codec (Phase 3)
+    "opuslib>=3.2.0; platform_system!='Windows'",  # Opus codec (Linux/macOS only)
+
+    # Utilities
+    "python-dotenv>=1.0.1",
+    "loguru>=0.7.3",  # Enhanced structured logging
+    "httpx>=0.28.0",  # For async HTTP (testing & potential API calls)
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+    "httpx>=0.25.0",  # For testing FastAPI
+
+    # Code quality
+    "ruff>=0.1.0",  # Linting and formatting
+    "mypy>=1.7.0",  # Type checking
+    "black>=23.11.0",
+
+    # Development tools
+    "ipython>=8.17.0",
+    "jupyter>=1.0.0",
+]
+
+cuda = [
+    # CUDA-specific dependencies (Linux with NVIDIA GPU)
+    "torch>=2.1.0+cu121",
+    "torchaudio>=2.1.0+cu121",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/auralis"
+Documentation = "https://github.com/yourusername/auralis/docs"
+Repository = "https://github.com/yourusername/auralis"
+Issues = "https://github.com/yourusername/auralis/issues"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --cov=auralis --cov-report=html --cov-report=term"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+select = ["E", "F", "I", "N", "W", "B", "ANN", "S"]
+ignore = ["ANN101", "ANN102", "S101"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]

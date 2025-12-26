@@ -22,7 +22,7 @@ Auralis generates continuous ambient sound that never repeats, blending algorith
 ```
 ┌──────────────┐        ┌──────────────────┐        ┌───────────────┐
 │ Composition  │  --->  │  Synthesis Core  │  --->  │ Ring Buffer   │
-│  (Markov &   │        │  (torchsynth)   │        │  + Encoder    │
+│  (Markov &   │        │  (torchsynth)    │        │  + Encoder    │
 │  Constraints)│        └──────────────────┘        └──────┬────────┘
 └──────────────┘                                           │
                                                            ▼
@@ -65,15 +65,15 @@ Auralis generates continuous ambient sound that never repeats, blending algorith
 git clone https://github.com/yourusername/auralis.git
 cd auralis
 
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
+# Install uv (fast Python package installer)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install dependencies
-pip install -r requirements.txt
+# Create virtual environment and install dependencies
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# (Optional) enable Apple GPU acceleration
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# Install project in development mode
+uv pip install -e ".[dev]"
 
 # Run the development server
 uvicorn server.main:app --reload
@@ -179,5 +179,5 @@ Every 10 seconds:
 
 ## 📜 License
 
-MIT License - Copyright 2025  
-Developed by Andrew MArconi
+MIT License - Copyright 2025
+Developed by Andrew Marconi
