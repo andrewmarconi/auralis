@@ -47,9 +47,7 @@ class RingBuffer:
         self.chunk_size = chunk_size
 
         # Pre-allocate buffer (stereo float32) - prevents GC pauses
-        self.buffer_data: NDArray[np.float32] = np.zeros(
-            (2, capacity_samples), dtype=np.float32
-        )
+        self.buffer_data: NDArray[np.float32] = np.zeros((2, capacity_samples), dtype=np.float32)
 
         # Atomic cursor positions
         self.write_position = 0
@@ -60,39 +58,64 @@ class RingBuffer:
         self._not_empty = threading.Condition(self._lock)
         self._not_full = threading.Condition(self._lock)
 
-    def write(self, audio_data: NDArray[np.float32]) -> bool:
+    def write_chunk(self, chunk: np.ndarray) -> int:
         """
         Write audio chunk to buffer.
 
         Args:
-            audio_data: Stereo audio array, shape (2, num_samples), float32 [-1, 1]
+            chunk: Audio data (int16, stereo interleaved)
 
         Returns:
-            True if write successful, False if buffer overflow
+            Chunk ID (write position)
+
+        Raises:
+            BufferFullError: If buffer is full and cannot accept writes
         """
-        if audio_data.shape[0] != 2:
-            raise ValueError("Audio data must be stereo (2 channels)")
+        # Convert float32 chunk to int16 stereo if needed
+        if chunk.dtype == np.float32:
+            audio_data = (chunk * 32767).astype(np.int16)
+        elif chunk.ndim == 2 and chunk.shape[0] == 2:
+            # Already in stereo float32 format, convert to interleaved int16
+            audio_data = np.empty((chunk.shape[1] * 2,), dtype=np.int16)
+            audio_data[0::2] = (chunk[0] * 32767).astype(np.int16)
+            audio_data[1::2] = (chunk[1] * 32767).astype(np.int16)
+        else:
+            # Assume already in correct format (int16 interleaved)
+            audio_data = chunk
 
-        num_samples = audio_data.shape[1]
+        return self._write_internal(audio_data)
 
-        with self._lock:
-            # Check for overflow
-            available_space = self._available_write_space()
-            if available_space < num_samples:
-                return False  # Buffer overflow
-
-            # Write to buffer (circular)
-            write_idx = self.write_position
-            end_idx = write_idx + num_samples
-
-            if end_idx <= self.capacity_samples:
+    def _write_internal(self, audio_data: np.ndarray) -> int:
+        """Internal write method that handles actual buffer writing."""
+        if audio_data.ndim != 1:
+            raise ValueError("Audio data for _write_internal must be 1D interleaved")
+        
+        num_samples = audio_data.shape[0]
+        num_channels = 2
+        num_stereo_samples = num_samples // num_channels
+        num_chunks = num_stereo_samples // self.chunk_size
+        
+        write_position = None
+        
+        for i in range(num_chunks):
+            start_sample = i * self.chunk_size * 2
+            end_sample = (i + 1) * self.chunk_size * 2
+            chunk_1d = audio_data[start_sample:end_sample]
+            # Convert 1D interleaved to 2D stereo
+            chunk_data = chunk_1d.reshape(-1, 2).T.astype(np.float32)
+            chunk_data = chunk_data.reshape(2, -1)
+            
+            if not self.write(chunk_data):
+                return write_position or self.write_position
+        
+        return self.write_position
                 # Contiguous write
                 self.buffer_data[:, write_idx:end_idx] = audio_data
             else:
                 # Wrap-around write
                 first_part = self.capacity_samples - write_idx
                 self.buffer_data[:, write_idx:] = audio_data[:, :first_part]
-                self.buffer_data[:, :num_samples - first_part] = audio_data[:, first_part:]
+                self.buffer_data[:, : num_samples - first_part] = audio_data[:, first_part:]
 
             # Update write cursor
             self.write_position = (write_idx + num_samples) % self.capacity_samples
@@ -133,7 +156,7 @@ class RingBuffer:
                 first_part = self.capacity_samples - read_idx
                 audio_data = np.zeros((2, num_samples), dtype=np.float32)
                 audio_data[:, :first_part] = self.buffer_data[:, read_idx:]
-                audio_data[:, first_part:] = self.buffer_data[:, :num_samples - first_part]
+                audio_data[:, first_part:] = self.buffer_data[:, : num_samples - first_part]
 
             # Update read cursor
             self.read_position = (read_idx + num_samples) % self.capacity_samples
@@ -141,7 +164,76 @@ class RingBuffer:
             # Signal writers
             self._not_full.notify()
 
-        return audio_data
+        return self.write_position
+
+    def read_chunk(self) -> Optional[np.ndarray]:
+        """
+        Read next audio chunk from buffer.
+
+        Returns:
+            Audio chunk or None if no data available
+
+        Raises:
+            BufferUnderrunError: If buffer is empty when read expected
+        """
+        with self._lock:
+            # Check for underflow
+            available_data = self._available_read_data()
+            if available_data < self.chunk_size:
+                # Not enough data for a full chunk
+                if available_data > 0:
+                    # Return partial chunk as underrun mitigation
+                    num_samples = available_data
+                    read_idx = self.read_position
+                    end_idx = read_idx + num_samples
+
+                    if end_idx <= self.capacity_samples:
+                        audio_data = self.buffer_data[:, read_idx:end_idx].copy()
+                    else:
+                        first_part = self.capacity_samples - read_idx
+                        audio_data = np.zeros((2, num_samples), dtype=np.float32)
+                        audio_data[:, :first_part] = self.buffer_data[:, read_idx:]
+                        audio_data[:, first_part:] = self.buffer_data[:, : num_samples - first_part]
+
+                    self.read_position = (read_idx + num_samples) % self.capacity_samples
+                    self._not_full.notify()
+                    return audio_data.astype(np.int16)
+                return None
+
+            # Read full chunk
+            read_idx = self.read_position
+            end_idx = read_idx + self.chunk_size
+
+            if end_idx <= self.capacity_samples:
+                audio_data = self.buffer_data[:, read_idx:end_idx].copy()
+            else:
+                first_part = self.capacity_samples - read_idx
+                audio_data = np.zeros((2, self.chunk_size), dtype=np.float32)
+                audio_data[:, :first_part] = self.buffer_data[:, read_idx:]
+                audio_data[:, first_part:] = self.buffer_data[:, : self.chunk_size - first_part]
+
+            # Convert to int16 interleaved format
+            audio_int16 = np.empty((self.chunk_size * 2,), dtype=np.int16)
+            audio_int16[0::2] = (audio_data[0] * 32767).astype(np.int16)
+            audio_int16[1::2] = (audio_data[1] * 32767).astype(np.int16)
+
+            # Update read cursor
+            self.read_position = (read_idx + self.chunk_size) % self.capacity_samples
+
+            # Signal writers
+            self._not_full.notify()
+
+            return audio_int16
+
+    def get_capacity(self) -> int:
+        """
+        Get buffer capacity.
+
+        Returns:
+            Maximum number of chunks buffer can hold
+        """
+        with self._lock:
+            return self.capacity_samples // self.chunk_size
 
     def read_blocking(
         self, num_samples: Optional[int] = None, timeout: Optional[float] = None
@@ -175,7 +267,7 @@ class RingBuffer:
                 first_part = self.capacity_samples - read_idx
                 audio_data = np.zeros((2, num_samples), dtype=np.float32)
                 audio_data[:, :first_part] = self.buffer_data[:, read_idx:]
-                audio_data[:, first_part:] = self.buffer_data[:, :num_samples - first_part]
+                audio_data[:, first_part:] = self.buffer_data[:, : num_samples - first_part]
 
             self.read_position = (read_idx + num_samples) % self.capacity_samples
             self._not_full.notify()
