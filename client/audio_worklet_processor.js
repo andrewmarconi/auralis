@@ -51,8 +51,8 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
     handleMessage(data) {
         if (data.type === 'audio') {
             // Track jitter (T030)
-            const now = currentTime; // AudioWorklet currentTime in seconds
-            const nowMs = now * 1000;
+            // Use performance.now() since we're in a message handler, not process()
+            const nowMs = performance.now();
 
             if (this.expectedNextChunkTime !== null) {
                 // Calculate jitter (deviation from expected delivery time)

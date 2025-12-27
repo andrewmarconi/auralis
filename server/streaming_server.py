@@ -19,6 +19,12 @@ from numpy.typing import NDArray
 from server.ring_buffer import RingBuffer
 
 
+# Forward reference for ApplicationState type hint
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from server.main import ApplicationState
+
+
 class AudioChunk:
     """
     100ms segment of audio data for WebSocket transmission.
@@ -83,14 +89,16 @@ class StreamingServer:
     Manages client connections and streams audio chunks from ring buffer.
     """
 
-    def __init__(self, ring_buffer: RingBuffer) -> None:
+    def __init__(self, ring_buffer: RingBuffer, app_state: Optional["ApplicationState"] = None) -> None:
         """
         Initialize streaming server.
 
         Args:
             ring_buffer: Shared ring buffer for audio data
+            app_state: Application state for parameter updates (optional)
         """
         self.ring_buffer = ring_buffer
+        self.app_state = app_state
         self.active_connections: set[WebSocket] = set()
         self.sequence_counter = 0
 
@@ -200,10 +208,64 @@ class StreamingServer:
 
             elif msg_type == "control":
                 # Handle parameter updates from client
-                # Parameters are updated via REST API, so acknowledge but don't change
-                await websocket.send_json(
-                    {"type": "control_ack", "message": "Parameters should be updated via REST API"}
-                )
+                try:
+                    if self.app_state is not None:
+                        # Update parameters directly from WebSocket control message
+                        updated_fields = []
+
+                        # Update boolean voice enable/disable controls
+                        if "enable_pads" in data:
+                            self.app_state.parameters.enable_pads = bool(data["enable_pads"])
+                            updated_fields.append("enable_pads")
+                        if "enable_melody" in data:
+                            self.app_state.parameters.enable_melody = bool(data["enable_melody"])
+                            updated_fields.append("enable_melody")
+                        if "enable_kicks" in data:
+                            self.app_state.parameters.enable_kicks = bool(data["enable_kicks"])
+                            updated_fields.append("enable_kicks")
+                        if "enable_swells" in data:
+                            self.app_state.parameters.enable_swells = bool(data["enable_swells"])
+                            updated_fields.append("enable_swells")
+
+                        # Update numeric parameters
+                        if "key" in data:
+                            self.app_state.parameters.key = str(data["key"])
+                            updated_fields.append("key")
+                        if "bpm" in data:
+                            self.app_state.parameters.bpm = int(data["bpm"])
+                            updated_fields.append("bpm")
+                        if "intensity" in data:
+                            self.app_state.parameters.intensity = float(data["intensity"])
+                            updated_fields.append("intensity")
+                        if "melody_complexity" in data:
+                            self.app_state.parameters.melody_complexity = float(data["melody_complexity"])
+                            updated_fields.append("melody_complexity")
+                        if "chord_progression_variety" in data:
+                            self.app_state.parameters.chord_progression_variety = float(data["chord_progression_variety"])
+                            updated_fields.append("chord_progression_variety")
+                        if "harmonic_density" in data:
+                            self.app_state.parameters.harmonic_density = float(data["harmonic_density"])
+                            updated_fields.append("harmonic_density")
+
+                        if updated_fields:
+                            logger.info(f"Parameters updated via WebSocket: {updated_fields}")
+
+                        await websocket.send_json({
+                            "type": "control_ack",
+                            "message": f"Parameters updated: {', '.join(updated_fields)}" if updated_fields else "No parameters updated",
+                            "updated_fields": updated_fields
+                        })
+                    else:
+                        # Fallback if app_state not available
+                        await websocket.send_json(
+                            {"type": "control_ack", "message": "Parameters should be updated via REST API"}
+                        )
+                except Exception as e:
+                    logger.error(f"Error updating parameters via WebSocket: {e}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Failed to update parameters: {str(e)}"
+                    })
 
             else:
                 logger.warning(f"Unknown control message type: {msg_type}")

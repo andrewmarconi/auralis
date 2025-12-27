@@ -1,0 +1,209 @@
+---
+# Prometheus Alert Rules for Auralis Performance Monitoring
+# Task: T095 [US3]
+#
+# Configure these alerts in your Prometheus instance to monitor
+# real-time audio streaming performance and resource utilization.
+
+groups:
+  - name: auralis_performance
+    interval: 30s
+    rules:
+      # Synthesis Latency Alerts (SC-001)
+      - alert: HighSynthesisLatency
+        expr: histogram_quantile(0.99, rate(auralis_synthesis_latency_seconds_bucket[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          component: synthesis
+        annotations:
+          summary: "Synthesis latency exceeds 100ms threshold"
+          description: "P99 synthesis latency is {{ $value | humanizeDuration }} (threshold: 100ms). Real-time audio performance may be degraded."
+
+      - alert: SynthesisLatencyDegrading
+        expr: rate(auralis_synthesis_latency_seconds_sum[5m]) / rate(auralis_synthesis_latency_seconds_count[5m]) > 0.075
+        for: 5m
+        labels:
+          severity: warning
+          component: synthesis
+        annotations:
+          summary: "Average synthesis latency increasing"
+          description: "Average synthesis latency is {{ $value | humanizeDuration }} over the last 5 minutes."
+
+      # Memory Alerts (SC-004, FR-005)
+      - alert: MemoryLeakDetected
+        expr: rate(auralis_memory_usage_mb{type="rss"}[1h]) > 20
+        for: 30m
+        labels:
+          severity: critical
+          component: memory
+        annotations:
+          summary: "Memory leak detected"
+          description: "Memory is growing at {{ $value | humanize }} MB/hour (threshold: 20 MB/hour). Investigate for memory leaks."
+
+      - alert: HighMemoryUsage
+        expr: auralis_memory_usage_mb{type="rss"} > 2048
+        for: 10m
+        labels:
+          severity: warning
+          component: memory
+        annotations:
+          summary: "Memory usage exceeds 2GB"
+          description: "RSS memory usage is {{ $value | humanize }} MB. Consider scaling or investigating memory consumption."
+
+      - alert: MemoryUsageGrowing
+        expr: predict_linear(auralis_memory_usage_mb{type="rss"}[2h], 8*3600) > 4096
+        for: 15m
+        labels:
+          severity: warning
+          component: memory
+        annotations:
+          summary: "Memory projected to exceed 4GB in 8 hours"
+          description: "Current growth trend projects memory usage to reach {{ $value | humanize }} MB in 8 hours."
+
+      # GPU Memory Alerts (T087)
+      - alert: HighGPUMemoryUsage
+        expr: auralis_gpu_memory_allocated_mb > 4096
+        for: 5m
+        labels:
+          severity: warning
+          component: gpu
+        annotations:
+          summary: "GPU memory usage exceeds 4GB"
+          description: "GPU allocated memory is {{ $value | humanize }} MB on device {{ $labels.device }}."
+
+      - alert: GPUMemoryFragmentation
+        expr: (auralis_gpu_memory_reserved_mb{device="cuda"} - auralis_gpu_memory_allocated_mb{device="cuda"}) > 1024
+        for: 10m
+        labels:
+          severity: warning
+          component: gpu
+        annotations:
+          summary: "GPU memory fragmentation detected"
+          description: "{{ $value | humanize }} MB difference between reserved and allocated GPU memory. Consider clearing GPU cache."
+
+      # CPU Alerts (SC-003)
+      - alert: HighCPUUsage
+        expr: auralis_cpu_usage_percent > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: cpu
+        annotations:
+          summary: "CPU usage exceeds 80%"
+          description: "CPU utilization is {{ $value | humanize }}%. Target is <80% for smooth real-time performance."
+
+      - alert: CPUUsageSpiking
+        expr: rate(auralis_cpu_usage_percent[1m]) > 20
+        for: 2m
+        labels:
+          severity: warning
+          component: cpu
+        annotations:
+          summary: "CPU usage spiking rapidly"
+          description: "CPU usage increased by {{ $value | humanize }}% in the last minute."
+
+      # GC Alerts (T088, T083)
+      - alert: ExcessiveGCCollections
+        expr: rate(auralis_gc_collections_total{generation="0"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: gc
+        annotations:
+          summary: "Excessive garbage collection frequency"
+          description: "Gen-0 GC collections occurring at {{ $value | humanize }} per second. Consider tuning GC thresholds."
+
+      - alert: Gen2GCCollections
+        expr: increase(auralis_gc_collections_total{generation="2"}[1h]) > 5
+        for: 30m
+        labels:
+          severity: warning
+          component: gc
+        annotations:
+          summary: "Frequent major garbage collections"
+          description: "{{ $value | humanize }} Gen-2 (major) GC collections in the last hour. This may cause latency spikes."
+
+      # Connection Alerts (SC-002)
+      - alert: NoActiveConnections
+        expr: auralis_active_connections == 0
+        for: 5m
+        labels:
+          severity: info
+          component: websocket
+        annotations:
+          summary: "No active connections"
+          description: "Server has no active WebSocket connections for 5 minutes."
+
+      - alert: ConnectionLimitApproaching
+        expr: auralis_active_connections > 8
+        for: 2m
+        labels:
+          severity: warning
+          component: websocket
+        annotations:
+          summary: "Approaching concurrent connection limit"
+          description: "{{ $value | humanize }} active connections (target capacity: 10). Consider scaling."
+
+      # Buffer Health Alerts (SC-001, SC-008)
+      - alert: BufferUnderrunRisk
+        expr: auralis_buffer_depth_ms < 300
+        for: 1m
+        labels:
+          severity: warning
+          component: buffer
+        annotations:
+          summary: "Buffer depth dangerously low"
+          description: "Buffer depth is {{ $value | humanize }}ms for client {{ $labels.client_id }}. Risk of audio underruns."
+
+      - alert: BufferJitterHigh
+        expr: stddev_over_time(auralis_buffer_depth_ms[1m]) > 50
+        for: 2m
+        labels:
+          severity: warning
+          component: buffer
+        annotations:
+          summary: "High buffer jitter detected"
+          description: "Buffer depth variance is {{ $value | humanize }}ms for client {{ $labels.client_id }}. May indicate network instability."
+
+      # Synthesis Rate Alerts (T089)
+      - alert: LowPhraseGenerationRate
+        expr: auralis_phrase_generation_rate_hz < 0.1
+        for: 2m
+        labels:
+          severity: warning
+          component: synthesis
+        annotations:
+          summary: "Phrase generation rate very low"
+          description: "Only {{ $value | humanize }} phrases generated per second. Synthesis may be stalled."
+
+      - alert: SynthesisStalled
+        expr: rate(auralis_synthesis_total[5m]) == 0
+        for: 3m
+        labels:
+          severity: critical
+          component: synthesis
+        annotations:
+          summary: "Synthesis engine appears stalled"
+          description: "No synthesis operations completed in the last 5 minutes. Check synthesis loop."
+
+  - name: auralis_success_criteria
+    interval: 1m
+    rules:
+      # Success Criteria Validation (from spec.md)
+
+      # SC-001: 99% of chunks delivered within 50ms
+      - record: auralis:chunk_delivery_success_rate
+        expr: histogram_quantile(0.99, rate(auralis_synthesis_latency_seconds_bucket[5m]))
+
+      # SC-003: CPU utilization reduced by 30% (requires baseline comparison)
+      - record: auralis:cpu_usage_avg_5m
+        expr: avg_over_time(auralis_cpu_usage_percent[5m])
+
+      # SC-004: Memory stable over 8 hours (<10% growth)
+      - record: auralis:memory_growth_rate_mb_per_hour
+        expr: rate(auralis_memory_usage_mb{type="rss"}[1h])
+
+      # SC-008: Jitter <20ms for 95% of chunks
+      - record: auralis:synthesis_latency_p95
+        expr: histogram_quantile(0.95, rate(auralis_synthesis_latency_seconds_bucket[5m]))
