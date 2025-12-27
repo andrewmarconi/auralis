@@ -3,12 +3,26 @@
  *
  * Replaces deprecated ScriptProcessorNode with modern AudioWorklet API.
  * Provides low-latency, glitch-free audio playback.
+ *
+ * Features (T029):
+ * - Adaptive buffer tier management (minimal/normal/stable/defensive)
+ * - Jitter-based tier adjustment
+ * - Real-time buffer health monitoring
  */
 
 class AuralisAudioClient {
-    constructor(wsUrl = 'ws://localhost:8000/ws/stream', targetLatencyMs = 400) {
+    constructor(wsUrl = 'ws://localhost:8000/ws/stream', initialTier = 'normal') {
         this.wsUrl = wsUrl;
-        this.targetLatencyMs = targetLatencyMs;
+
+        // Adaptive buffer tiers (T029)
+        this.bufferTiers = {
+            minimal: { targetMs: 300, description: 'Stable network, lowest latency' },
+            normal: { targetMs: 500, description: 'Default for new connections' },
+            stable: { targetMs: 800, description: 'Occasional jitter compensation' },
+            defensive: { targetMs: 1200, description: 'High jitter protection' },
+        };
+        this.currentTier = initialTier;
+        this.targetLatencyMs = this.bufferTiers[initialTier].targetMs;
 
         // Audio context
         this.audioContext = null;
@@ -24,6 +38,15 @@ class AuralisAudioClient {
         this.bufferUnderruns = 0;
         this.currentBufferDepthMs = 0;
         this.currentPlaybackRate = 1.0;
+
+        // Jitter metrics from worklet (T029)
+        this.jitterMeanMs = 0;
+        this.jitterStdMs = 0;
+        this.underrunRate = 0;
+
+        // Tier adjustment tracking
+        this.tierAdjustmentInterval = 50; // Adjust every 50 chunks
+        this.chunksReceivedSinceLastAdjustment = 0;
     }
 
     async connect() {
@@ -160,8 +183,69 @@ class AuralisAudioClient {
             this.currentBufferDepthMs = data.bufferDepthMs;
             this.currentPlaybackRate = data.playbackRate;
             this.bufferUnderruns = data.underrunCount;
+
+            // Update jitter metrics from worklet (T029)
+            if (data.jitterMeanMs !== undefined) {
+                this.jitterMeanMs = data.jitterMeanMs;
+                this.jitterStdMs = data.jitterStdMs || 0;
+                this.underrunRate = data.underrunRate || 0;
+
+                // Check if we should adjust buffer tier
+                this.chunksReceivedSinceLastAdjustment++;
+                if (this.chunksReceivedSinceLastAdjustment >= this.tierAdjustmentInterval) {
+                    this.adjustBufferTier();
+                    this.chunksReceivedSinceLastAdjustment = 0;
+                }
+            }
         } else if (data.type === 'ready') {
             console.log('[Client] AudioWorklet ready');
+        }
+    }
+
+    adjustBufferTier() {
+        /**
+         * Adjust buffer tier based on jitter and underrun metrics (T029).
+         *
+         * Escalation triggers:
+         * - Jitter (mean + std) > 50ms
+         * - OR underrun rate > 5%
+         *
+         * De-escalation triggers:
+         * - Jitter (mean + std) < 20ms
+         * - AND underrun rate < 1%
+         */
+        const tierOrder = ['minimal', 'normal', 'stable', 'defensive'];
+        const currentIndex = tierOrder.indexOf(this.currentTier);
+
+        const jitterTotal = this.jitterMeanMs + this.jitterStdMs;
+        const shouldEscalate = jitterTotal > 50 || this.underrunRate > 0.05;
+        const shouldDeEscalate = jitterTotal < 20 && this.underrunRate < 0.01;
+
+        let newTier = this.currentTier;
+
+        if (shouldEscalate && currentIndex < tierOrder.length - 1) {
+            // Escalate to higher tier
+            newTier = tierOrder[currentIndex + 1];
+        } else if (shouldDeEscalate && currentIndex > 0) {
+            // De-escalate to lower tier
+            newTier = tierOrder[currentIndex - 1];
+        }
+
+        if (newTier !== this.currentTier) {
+            const oldTier = this.currentTier;
+            this.currentTier = newTier;
+            this.targetLatencyMs = this.bufferTiers[newTier].targetMs;
+
+            console.log(`[Client] Buffer tier adjusted: ${oldTier} → ${newTier} ` +
+                        `(jitter=${jitterTotal.toFixed(1)}ms, underruns=${(this.underrunRate * 100).toFixed(1)}%)`);
+
+            // Send updated target latency to worklet
+            if (this.workletNode) {
+                this.workletNode.port.postMessage({
+                    type: 'control',
+                    targetLatencyMs: this.targetLatencyMs,
+                });
+            }
         }
     }
 
@@ -216,6 +300,12 @@ class AuralisAudioClient {
             chunkErrors: this.chunkErrors,
             bufferUnderruns: this.bufferUnderruns,
             errorRate: this.chunkErrors / Math.max(this.chunksReceived, 1),
+            // Buffer tier information (T029)
+            bufferTier: this.currentTier,
+            targetLatencyMs: this.targetLatencyMs,
+            jitterMeanMs: this.jitterMeanMs,
+            jitterStdMs: this.jitterStdMs,
+            underrunRate: this.underrunRate,
         };
     }
 

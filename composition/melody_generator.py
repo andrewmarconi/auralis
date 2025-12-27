@@ -143,9 +143,9 @@ class ConstrainedMelodyGenerator:
         self.chromatic_prob = chromatic_prob / total
 
         # Calculate note density based on intensity
-        # Low intensity: ~1 note per bar
-        # High intensity: ~4 notes per bar
-        notes_per_second = 0.1 + (intensity * 0.4)
+        # Low intensity: ~0.5 notes/second (sparse)
+        # High intensity: ~2.5 notes/second (continuous)
+        notes_per_second = 0.5 + (intensity * 2.0)
 
         # Generate notes throughout duration
         current_time = 0.0
@@ -156,16 +156,34 @@ class ConstrainedMelodyGenerator:
             # Generate note pitch constrained to harmony
             pitch_midi = self._generate_constrained_pitch(active_chord, intensity)
 
-            # Note duration (ambient = longer notes)
-            duration = random.uniform(0.25, 1.0)  # 0.25-1.0 seconds
+            # Note duration (ambient = longer, varied notes)
+            # Low intensity: 1-4 second notes, high: 0.5-2 second notes
+            if intensity < 0.3:
+                duration = random.uniform(2.0, 5.0)  # Very long, sustained
+            elif intensity < 0.6:
+                duration = random.uniform(1.0, 3.0)  # Medium sustained
+            else:
+                duration = random.uniform(0.5, 2.0)  # Shorter, more active
 
-            # Velocity (ambient = softer dynamics)
-            velocity = random.uniform(0.3, 0.6) * intensity
+            # Velocity (ambient = softer dynamics with variation)
+            base_velocity = random.uniform(0.25, 0.5)
+            velocity = base_velocity * (0.7 + intensity * 0.3)
 
             notes.append((current_time, pitch_midi, velocity, duration))
 
-            # Inter-onset interval (sparse for ambient)
-            interval = random.uniform(0.5, 2.0) / notes_per_second
+            # Inter-onset interval with MUCH more variation for organic, non-repetitive feel
+            # Base interval from note density
+            base_interval = 1.0 / notes_per_second
+
+            # Add substantial random variation (±50-150%)
+            variation_factor = random.uniform(0.5, 2.5)
+            interval = base_interval * variation_factor
+
+            # Occasionally add longer pauses for breathing room
+            if random.random() < 0.2:  # 20% chance
+                interval *= random.uniform(1.5, 3.0)
+
+            interval = max(0.2, interval)  # Minimum 200ms
             current_time += interval
 
         # Calculate bars from duration and BPM
@@ -191,11 +209,25 @@ class ConstrainedMelodyGenerator:
         Returns:
             Chord symbol active at time_sec
         """
-        # TODO: Implement proper chord timing lookup
-        # For now, return first chord as placeholder
-        if chord_progression:
-            return chord_progression[0][2]
-        return "i"  # Default to tonic
+        if not chord_progression:
+            return "i"  # Default to tonic
+
+        # Convert time to samples for comparison
+        sample_rate = 44100  # Standard sample rate
+        time_samples = int(time_sec * sample_rate)
+
+        # Find the chord active at this time
+        # Chords are sorted by onset time
+        active_chord = chord_progression[0][2]  # Start with first chord
+
+        for onset_sample, root_midi, chord_type in chord_progression:
+            if onset_sample <= time_samples:
+                active_chord = chord_type
+            else:
+                # We've passed the current time
+                break
+
+        return active_chord
 
     def _generate_constrained_pitch(self, chord_symbol: str, intensity: float) -> int:
         """

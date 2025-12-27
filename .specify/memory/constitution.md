@@ -1,9 +1,9 @@
 <!-- Sync Impact Report -->
-<!-- Version change: None → 1.0.0 (initial constitution) -->
-<!-- Modified principles: None (all new) -->
-<!-- Added sections: Core Principles, Development Standards, Development Workflow, Governance -->
+<!-- Version change: 1.0.0 → 1.1.0 (new principle added) -->
+<!-- Modified principles: None -->
+<!-- Added sections: VI. Developer Experience & Flow Efficiency -->
 <!-- Removed sections: None -->
-<!-- Templates requiring updates: ✅ plan-template.md, ✅ tasks-template.md, ✅ spec-template.md, ✅ AGENTS.md -->
+<!-- Templates requiring updates: ✅ plan-template.md (Constitution Check section updated) -->
 <!-- Follow-up TODOs: None -->
 
 # Auralis Constitution
@@ -25,12 +25,22 @@ All audio synthesis MUST prioritize GPU acceleration through Metal/CUDA. CPU-onl
 ### V. WebSocket Streaming Protocol
 All client-server communication MUST use WebSockets for real-time audio streaming. No REST for audio data. WebSocket frames must contain base64-encoded PCM chunks with consistent timing metadata. Adaptive client buffering required for seamless playback.
 
+### VI. Developer Experience & Flow Efficiency
+All code and implementation work MUST actively address developer experience quality metrics. Specifically:
+
+- **Cyclomatic Complexity**: Keep functions under McCabe complexity of 10. Complex logic MUST be decomposed into smaller, focused functions with clear single responsibilities.
+- **Workflow Friction**: Minimize context switching and tool overhead. Development commands MUST be discoverable, consistent, and fast (<5s for common operations).
+- **Lead Time for Changes**: Design for rapid iteration. Code changes MUST be implementable and testable within a single focus session without requiring large-scale refactoring.
+- **Focus Disruption**: Reduce cognitive load through clear naming, explicit interfaces, and predictable patterns. Avoid deep nesting (>3 levels), magic numbers, and implicit behaviors.
+
+**Rationale**: High-quality developer experience directly impacts code quality, maintainability, and team velocity. By systematically reducing complexity and friction, we enable faster iteration cycles, reduce bugs, and improve long-term sustainability of the codebase.
+
 ## Development Standards
 
 ### Technology Stack Requirements
 - Python 3.12+ managed through uv
 - FastAPI for server endpoints
-- PyTorch + torchsynth for audio synthesis  
+- PyTorch + torchsynth for audio synthesis
 - WebSockets for real-time streaming
 - Web Audio API for client playback
 - Asyncio for concurrent operations
@@ -42,6 +52,9 @@ All client-server communication MUST use WebSockets for real-time audio streamin
 - Maintain <100ms audio processing latency
 - Memory usage optimized for continuous operation
 - Error handling must preserve audio stream continuity
+- Functions limited to McCabe complexity ≤10
+- Maximum nesting depth of 3 levels
+- Clear, descriptive naming without abbreviations
 
 ## Development Workflow
 
@@ -55,6 +68,9 @@ All PRs MUST verify:
 - No blocking operations in audio pipeline
 - Modular architecture boundaries maintained
 - GPU acceleration properly utilized
+- Cyclomatic complexity within acceptable bounds
+- No unnecessary workflow friction introduced
+- Changes testable within single focus session
 
 ### Testing Strategy
 Integration tests MUST verify:
@@ -67,4 +83,4 @@ Integration tests MUST verify:
 
 This constitution supersedes all other development practices. Amendments require documentation, approval, and migration plan. All development must verify compliance through automated checks and code review.
 
-**Version**: 1.0.0 | **Ratified**: 2025-01-26 | **Last Amended**: 2025-01-26
+**Version**: 1.1.0 | **Ratified**: 2025-01-26 | **Last Amended**: 2025-12-27

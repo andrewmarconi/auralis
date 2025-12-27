@@ -12,9 +12,10 @@ from typing import List, Optional
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from pydantic import BaseModel, Field
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
+from prometheus_client.core import CollectorRegistry
 
 from server.ring_buffer import RingBuffer
 from server.streaming_server import StreamingServer
@@ -37,6 +38,10 @@ class SynthesisParameters(BaseModel):
     harmonic_density: float = Field(
         default=0.5, ge=0.0, le=1.0, description="Controls layered chord richness"
     )
+    enable_pads: bool = Field(default=True, description="Enable chord pad voices")
+    enable_melody: bool = Field(default=True, description="Enable melody lead voice")
+    enable_kicks: bool = Field(default=True, description="Enable kick drum percussion")
+    enable_swells: bool = Field(default=True, description="Enable ambient swells")
 
 
 class PerformanceMetrics(BaseModel):
@@ -171,14 +176,19 @@ async def synthesis_loop():
     """
     from composition.chord_generator import ChordProgressionGenerator
     from composition.melody_generator import ConstrainedMelodyGenerator
+    from composition.percussion_generator import PercussionGenerator
 
     logger.info("Starting synthesis loop...")
 
     # Initialize generators
     chord_gen = ChordProgressionGenerator()
     melody_gen = ConstrainedMelodyGenerator()
+    percussion_gen = PercussionGenerator()
 
     phrase_count = 0
+    current_progression = None
+    progression_start_time = 0
+    progression_duration_sec = 0
 
     while True:
         try:
@@ -190,28 +200,93 @@ async def synthesis_loop():
             # Generate 1-second phrase (fits easily in 2-second buffer)
             duration_sec = 1.0
 
-            # Generate chord progression (for musical context)
-            chord_progression = chord_gen.generate_progression(
-                length_bars=2, variety=app_state.parameters.chord_progression_variety
-            )
-            chord_events = chord_progression.to_midi_events(bpm=bpm)
+            # Calculate progression duration (8 bars)
+            bars_per_progression = 8
+            seconds_per_bar = (60.0 / bpm) * 4  # 4/4 time
+            progression_duration_sec = seconds_per_bar * bars_per_progression
 
-            # Generate melody constrained to chords
-            melody_phrase = melody_gen.generate_melody(
-                chord_progression=chord_events,
-                duration_sec=duration_sec,
-                bpm=bpm,
-                intensity=intensity,
-                complexity=app_state.parameters.melody_complexity,
-            )
-            melody_events = melody_phrase.to_sample_events()
+            # Generate new chord progression if needed (every 8 bars or on first run)
+            current_time = time.time()
+            if (
+                current_progression is None
+                or (current_time - progression_start_time) >= progression_duration_sec
+            ):
+                current_progression = chord_gen.generate_progression(
+                    length_bars=bars_per_progression,
+                    variety=app_state.parameters.chord_progression_variety,
+                )
+                progression_start_time = current_time
+                chord_seq = " → ".join(current_progression.chords)
+                logger.info(f"New chord progression: {chord_seq}")
 
-            # Render audio
-            start_time = time.time()
+            # Convert to MIDI events
+            all_chord_events = current_progression.to_midi_events(bpm=bpm)
+
+            # Calculate current position in progression (in samples)
+            time_in_progression = current_time - progression_start_time
+            offset_samples = int(time_in_progression * 44100)
+
+            # Extract chords active in this 1-second window and offset them
+            chunk_samples = int(duration_sec * 44100)
+            chord_events = []
+            for onset_sample, root_midi, chord_type in all_chord_events:
+                # Offset to current position
+                adjusted_onset = onset_sample - offset_samples
+                # Keep chords that fall within this chunk window
+                if -chunk_samples < adjusted_onset < chunk_samples:
+                    # Clamp to chunk boundaries
+                    clamped_onset = max(0, adjusted_onset)
+                    chord_events.append((clamped_onset, root_midi, chord_type))
+
+            # If no chords in this window, use the most recent chord
+            if not chord_events:
+                # Find the last chord before this window
+                for onset_sample, root_midi, chord_type in reversed(all_chord_events):
+                    if onset_sample <= offset_samples:
+                        chord_events = [(0, root_midi, chord_type)]
+                        break
+
+            # Debug: log active chords every 5 phrases
+            if phrase_count % 5 == 0:
+                active_chords = ", ".join(
+                    [f"{chord_type}@{onset}s" for onset, _, chord_type in chord_events]
+                )
+                logger.debug(f"Phrase #{phrase_count} - Active chords: {active_chords}")
+
+            # Generate melody constrained to chords (if enabled)
+            melody_events = []
+            if app_state.parameters.enable_melody:
+                melody_phrase = melody_gen.generate_melody(
+                    chord_progression=chord_events,
+                    duration_sec=duration_sec,
+                    bpm=bpm,
+                    intensity=intensity,
+                    complexity=app_state.parameters.melody_complexity,
+                )
+                melody_events = melody_phrase.to_sample_events()
+
+            # Generate percussion events (just for this 1-second chunk, if enabled)
+            kicks = None
+            swells = None
+            if app_state.parameters.enable_kicks or app_state.parameters.enable_swells:
+                kicks_generated, swells_generated = percussion_gen.generate_percussion(
+                    num_bars=2,
+                    bpm=bpm,
+                    sample_rate=44100,
+                    intensity=intensity,
+                )
+                kicks = kicks_generated if app_state.parameters.enable_kicks else None
+                swells = swells_generated if app_state.parameters.enable_swells else None
+
+            # Conditionally pass chord events based on enable_pads flag
+            chord_events_to_render = chord_events if app_state.parameters.enable_pads else []
+
+            # Render audio with selected voices
+            start_render = time.time()
             audio_data = app_state.synthesis_engine.render_phrase(
-                chord_events, melody_events, duration_sec
+                chord_events_to_render, melody_events, duration_sec, kicks=kicks, swells=swells
             )
-            synthesis_time_ms = (time.time() - start_time) * 1000
+            synthesis_time_ms = (time.time() - start_render) * 1000
 
             # Write to ring buffer (1 second = 44,100 samples fits in buffer)
             success = app_state.ring_buffer.write(audio_data)
@@ -335,6 +410,21 @@ async def update_control(params: SynthesisParameters):
         "parameters": adjusted_params.model_dump(),
         "warnings": warnings,
     }
+
+    # Prometheus metrics endpoint
+    @app.get("/metrics")
+    def prometheus_metrics():
+        """
+        Expose Prometheus metrics in text format.
+
+        Returns:
+            Prometheus text exposition format for scraping
+        """
+        registry = REGISTRY
+        return Response(
+            content=generate_latest(registry),
+            media_type=CONTENT_TYPE_LATEST,
+        )
 
 
 # Static files for client (must be before route definitions)
