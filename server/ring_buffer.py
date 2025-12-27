@@ -75,14 +75,15 @@ class RingBuffer:
         Raises:
             BufferFullError: If buffer is full and cannot accept writes
         """
-        # Convert float32 chunk to int16 stereo if needed
-        if chunk.dtype == np.float32:
-            audio_data = (chunk * 32767).astype(np.int16)
-        elif chunk.ndim == 2 and chunk.shape[0] == 2:
-            # Already in stereo float32 format, convert to interleaved int16
+        # Convert audio chunk to int16 interleaved format if needed
+        if chunk.ndim == 2 and chunk.shape[0] == 2:
+            # Stereo float32 format (2, num_samples) - convert to interleaved int16
             audio_data = np.empty((chunk.shape[1] * 2,), dtype=np.int16)
             audio_data[0::2] = (chunk[0] * 32767).astype(np.int16)
             audio_data[1::2] = (chunk[1] * 32767).astype(np.int16)
+        elif chunk.dtype == np.float32:
+            # 1D float32 format - convert to int16
+            audio_data = (chunk * 32767).astype(np.int16)
         else:
             # Assume already in correct format (int16 interleaved)
             audio_data = chunk

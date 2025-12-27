@@ -9,6 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
+import numpy as np
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -20,6 +21,7 @@ from prometheus_client.core import CollectorRegistry
 from server.ring_buffer import RingBuffer
 from server.streaming_server import StreamingServer
 from server.synthesis_engine import SynthesisEngine
+from server.gc_config import RealTimeGCConfig
 
 
 # Configuration Models
@@ -118,6 +120,9 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
     logger.info("🎧 Starting Auralis server...")
 
+    # Apply real-time GC configuration (T082)
+    RealTimeGCConfig.apply_realtime_config()
+
     # Initialize components
     app_state.ring_buffer = RingBuffer(
         capacity_samples=88200,  # 2 seconds
@@ -127,13 +132,14 @@ async def lifespan(app: FastAPI):
 
     app_state.synthesis_engine = SynthesisEngine(sample_rate=44100)
 
-    app_state.streaming_server = StreamingServer(app_state.ring_buffer)
+    app_state.streaming_server = StreamingServer(app_state.ring_buffer, app_state)
 
     # Start background synthesis task
     app_state.synthesis_task = asyncio.create_task(synthesis_loop())
 
     logger.info(f"✓ Synthesis engine ready: {app_state.synthesis_engine.device.type}")
     logger.info(f"✓ Ring buffer initialized: {app_state.ring_buffer.capacity_samples} samples")
+    logger.info(f"✓ Initial parameters: pads={app_state.parameters.enable_pads}, melody={app_state.parameters.enable_melody}, kicks={app_state.parameters.enable_kicks}, swells={app_state.parameters.enable_swells}")
     logger.info("✓ Server ready for connections")
 
     yield
@@ -281,6 +287,15 @@ async def synthesis_loop():
             # Conditionally pass chord events based on enable_pads flag
             chord_events_to_render = chord_events if app_state.parameters.enable_pads else []
 
+            # Debug: Log what we're about to render
+            num_chords = len(chord_events_to_render)
+            num_melody = len(melody_events)
+            has_kicks = kicks is not None and len(kicks) > 0
+            has_swells = swells is not None and len(swells) > 0
+
+            if phrase_count == 0:  # Log only first phrase to avoid spam
+                logger.info(f"Rendering: {num_chords} chords, {num_melody} melody notes, kicks={has_kicks}, swells={has_swells}")
+
             # Render audio with selected voices
             start_render = time.time()
             audio_data = app_state.synthesis_engine.render_phrase(
@@ -288,8 +303,13 @@ async def synthesis_loop():
             )
             synthesis_time_ms = (time.time() - start_render) * 1000
 
+            # Debug: Check if audio was actually generated
+            if phrase_count == 0:
+                audio_rms = np.sqrt(np.mean(audio_data**2))
+                logger.info(f"Generated audio RMS: {audio_rms:.6f}, shape: {audio_data.shape}")
+
             # Write to ring buffer (1 second = 44,100 samples fits in buffer)
-            success = app_state.ring_buffer.write(audio_data)
+            success = app_state.ring_buffer.write_chunk(audio_data)
 
             if not success:
                 # Buffer full - wait a bit for it to drain
