@@ -12,6 +12,8 @@ from loguru import logger
 from numpy.typing import NDArray
 import math
 
+from server.device_selector import DeviceSelector, DeviceInfo
+
 
 class GPUDeviceManager:
     """
@@ -448,6 +450,7 @@ class SynthesisEngine:
         self,
         sample_rate: int = 44100,
         device: Optional[torch.device] = None,
+        max_duration_sec: float = 32.0,  # Pre-allocate for max phrase duration
     ) -> None:
         """
         Initialize synthesis engine with GPU acceleration.
@@ -455,20 +458,32 @@ class SynthesisEngine:
         Args:
             sample_rate: Audio sampling rate in Hz
             device: Compute device (None = auto-detect optimal)
+            max_duration_sec: Maximum phrase duration for buffer pre-allocation
         """
         self.sample_rate = sample_rate
+        self.max_duration_sec = max_duration_sec
 
-        # Auto-detect optimal device if not specified
+        # Auto-detect optimal device if not specified using DeviceSelector
         if device is None:
-            self.device = GPUDeviceManager.get_optimal_device()
+            self.device = DeviceSelector.get_optimal_device()
         else:
             self.device = device
 
         logger.info(f"Synthesis engine initialized on {self.device}")
 
-        # Device capabilities
-        self.device_info = GPUDeviceManager.get_device_info()
+        # Device capabilities (using DeviceSelector)
+        self.device_info = DeviceSelector.get_device_info(self.device)
         self.gpu_available = self.device.type in ["mps", "cuda"]
+
+        # Pre-allocate audio buffer for maximum expected duration (T026)
+        # This prevents repeated allocation/deallocation during rendering
+        max_samples = int(max_duration_sec * sample_rate)
+        self._preallocated_buffer = torch.zeros(max_samples, device=self.device, dtype=torch.float32)
+        logger.info(f"✓ Pre-allocated audio buffer: {max_samples} samples ({max_duration_sec}s)")
+
+        # Performance tracking for GPU cache management (T028)
+        self._render_count = 0
+        self._gpu_cache_clear_interval = 100  # Clear cache every 100 renders
 
         # Initialize voice modules
         self.pad_voice = AmbientPadVoice(sample_rate=sample_rate, device=self.device)
@@ -499,31 +514,67 @@ class SynthesisEngine:
         Returns:
             Stereo audio array, shape (2, num_samples), float32 [-1, 1]
         """
+        # Increment render counter for GPU cache management
+        self._render_count += 1
+
+        # GPU cache clearing every 100 renders (T028)
+        if self._render_count % self._gpu_cache_clear_interval == 0:
+            self._clear_gpu_cache()
+
         num_samples = int(duration_sec * self.sample_rate)
 
-        # Initialize output buffer on GPU
-        audio = torch.zeros(num_samples, device=self.device)
+        # Validate duration doesn't exceed pre-allocated buffer
+        if num_samples > len(self._preallocated_buffer):
+            logger.warning(
+                f"Phrase duration ({duration_sec}s) exceeds pre-allocated buffer "
+                f"({self.max_duration_sec}s). Falling back to dynamic allocation."
+            )
+            audio = torch.zeros(num_samples, device=self.device, dtype=torch.float32)
+        else:
+            # Use pre-allocated buffer (T026)
+            # Zero out the portion we'll use
+            audio = self._preallocated_buffer[:num_samples]
+            audio.zero_()
 
-        # Render chord pads
-        audio = self._render_chord_pads(audio, chords, num_samples)
+        # Wrap all rendering in torch.no_grad() to prevent gradient tracking (T027)
+        # This reduces memory usage and improves performance
+        with torch.no_grad():
+            # Render chord pads
+            audio = self._render_chord_pads(audio, chords, num_samples)
 
-        # Render melody lead
-        audio = self._render_melody_lead(audio, melody, num_samples)
+            # Render melody lead
+            audio = self._render_melody_lead(audio, melody, num_samples)
 
-        # Render percussion (if provided)
-        if kicks:
-            audio = self._render_kicks(audio, kicks, num_samples)
-        if swells:
-            audio = self._render_swells(audio, swells, num_samples)
+            # Render percussion (if provided)
+            if kicks:
+                audio = self._render_kicks(audio, kicks, num_samples)
+            if swells:
+                audio = self._render_swells(audio, swells, num_samples)
 
-        # Normalize and convert to stereo
-        audio = torch.tanh(audio * 0.7)  # Soft clipping for dynamics
-        audio_np = audio.cpu().numpy()
+            # Normalize and convert to stereo
+            audio = torch.tanh(audio * 0.7)  # Soft clipping for dynamics
+            audio_np = audio.cpu().numpy()
 
         # Create stereo image
         stereo = np.stack([audio_np, audio_np], axis=0)
 
         return stereo.astype(np.float32)
+
+    def _clear_gpu_cache(self) -> None:
+        """
+        Clear GPU cache to prevent memory fragmentation (T028).
+
+        Called every 100 renders to maintain optimal GPU memory performance.
+        """
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            logger.debug(f"GPU cache cleared after {self._render_count} renders")
+        elif self.device.type == "mps":
+            # Metal doesn't have explicit cache clearing, but we can trigger GC
+            import gc
+
+            gc.collect()
+            logger.debug(f"Memory GC triggered after {self._render_count} renders")
 
     def _render_chord_pads(
         self,
@@ -744,8 +795,17 @@ class SynthesisEngine:
         """
         return {
             "device_type": self.device.type,
-            "device_info": self.device_info,
+            "device_info": {
+                "type": self.device_info.device_type,
+                "name": self.device_info.device_name,
+                "total_memory_mb": self.device_info.total_memory_mb,
+                "available_memory_mb": self.device_info.available_memory_mb,
+                "supports_fp16": self.device_info.supports_fp16,
+                "unified_memory": self.device_info.unified_memory,
+            },
             "gpu_available": self.gpu_available,
             "sample_rate": self.sample_rate,
             "estimated_latency_ms": self.get_latency_ms(),
+            "render_count": self._render_count,
+            "preallocated_buffer_size_sec": self.max_duration_sec,
         }

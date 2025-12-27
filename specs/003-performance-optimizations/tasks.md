@@ -77,23 +77,23 @@
 - [X] T018 [P] [US1] Implement ChunkTimestamp dataclass in server/buffer_management.py
 - [X] T019 [P] [US1] Implement JitterTracker with EMA in server/buffer_management.py
 - [X] T020 [P] [US1] Implement TokenBucket rate limiter in server/buffer_management.py
-- [ ] T021 [US1] Implement AdaptiveRingBuffer with 4-tier system in server/ring_buffer.py (depends on T019, T020)
-- [ ] T022 [US1] Add tier adjustment logic to AdaptiveRingBuffer based on jitter and underrun rate
-- [ ] T023 [US1] Implement get_buffer_health() method returning tier, depth, jitter metrics
+- [X] T021 [US1] Implement AdaptiveRingBuffer with 4-tier system in server/ring_buffer.py (depends on T019, T020)
+- [X] T022 [US1] Add tier adjustment logic to AdaptiveRingBuffer based on jitter and underrun rate
+- [X] T023 [US1] Implement get_buffer_health() method returning tier, depth, jitter metrics
 
 #### Synthesis Optimization
 
-- [ ] T024 [P] [US1] Create DeviceSelector for GPU device detection in server/device_selector.py
-- [ ] T025 [US1] Update SynthesisEngine in server/synthesis_engine.py to use DeviceSelector
-- [ ] T026 [US1] Add memory pre-allocation for audio buffers in server/synthesis_engine.py
-- [ ] T027 [US1] Implement torch.no_grad() context in synthesis loops to prevent gradient leaks
-- [ ] T028 [US1] Add GPU cache clearing every 100 renders in server/synthesis_engine.py
+- [X] T024 [P] [US1] Create DeviceSelector for GPU device detection in server/device_selector.py
+- [X] T025 [US1] Update SynthesisEngine in server/synthesis_engine.py to use DeviceSelector
+- [X] T026 [US1] Add memory pre-allocation for audio buffers in server/synthesis_engine.py
+- [X] T027 [US1] Implement torch.no_grad() context in synthesis loops to prevent gradient leaks
+- [X] T028 [US1] Add GPU cache clearing every 100 renders in server/synthesis_engine.py
 
 #### Client-Side Adaptive Buffering
 
-- [ ] T029 [P] [US1] Implement adaptive buffer sizing in client/audio_client_worklet.js
-- [ ] T030 [US1] Add jitter tracking to AudioWorklet processor in client/audio_worklet_processor.js
-- [ ] T031 [US1] Implement buffer health status display in client UI (client/index.html)
+- [X] T029 [P] [US1] Implement adaptive buffer sizing in client/audio_client_worklet.js
+- [X] T030 [US1] Add jitter tracking to AudioWorklet processor in client/audio_worklet_processor.js
+- [X] T031 [US1] Implement buffer health status display in client UI (client/index.html)
 
 #### Integration & Monitoring
 

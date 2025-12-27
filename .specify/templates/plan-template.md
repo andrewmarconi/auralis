@@ -32,10 +32,11 @@
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
 - **UV-First**: All Python dependencies managed via uv, no manual venv creation
-- **Real-Time Performance**: Audio streaming latency <100ms preserved in all changes  
+- **Real-Time Performance**: Audio streaming latency <100ms preserved in all changes
 - **Modular Architecture**: Clear separation of server/, composition/, client/ modules
 - **GPU Acceleration**: Metal/CUDA utilization prioritized for synthesis
 - **WebSocket Protocol**: Audio data exclusively via WebSocket streaming
+- **Developer Experience**: Cyclomatic complexity ≤10, minimal workflow friction, rapid iteration, reduced focus disruption
 
 ## Project Structure
 
