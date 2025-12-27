@@ -3,6 +3,11 @@
  *
  * Runs in the audio rendering thread for low-latency playback.
  * Reads from ring buffer and outputs to speakers.
+ *
+ * Features (T030):
+ * - Jitter tracking with EMA smoothing
+ * - Adaptive buffer tier management
+ * - Real-time underrun detection
  */
 
 class AuralisAudioProcessor extends AudioWorkletProcessor {
@@ -23,6 +28,17 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
         this.underrunCount = 0;
         this.frameCount = 0;
 
+        // Jitter tracking (T030)
+        this.expectedNextChunkTime = null; // Expected time for next chunk delivery
+        this.lastChunkTime = null; // Actual time of last chunk
+        this.expectedChunkInterval = 100; // 100ms chunk duration
+        this.jitterEMA = 0; // Exponential moving average of jitter (ms)
+        this.jitterVarianceEMA = 0; // EMA of jitter variance
+        this.jitterAlpha = 0.1; // EMA smoothing factor
+        this.chunksReceived = 0;
+        this.jitterHistory = []; // Last 50 jitter measurements
+        this.maxJitterHistorySize = 50;
+
         // Listen for audio data from main thread
         this.port.onmessage = (event) => {
             this.handleMessage(event.data);
@@ -34,6 +50,37 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
 
     handleMessage(data) {
         if (data.type === 'audio') {
+            // Track jitter (T030)
+            const now = currentTime; // AudioWorklet currentTime in seconds
+            const nowMs = now * 1000;
+
+            if (this.expectedNextChunkTime !== null) {
+                // Calculate jitter (deviation from expected delivery time)
+                const jitterMs = Math.abs(nowMs - this.expectedNextChunkTime);
+
+                // Update EMA
+                if (this.jitterEMA === 0) {
+                    // First measurement
+                    this.jitterEMA = jitterMs;
+                    this.jitterVarianceEMA = jitterMs * jitterMs;
+                } else {
+                    // EMA update: new = α * x + (1-α) * old
+                    this.jitterEMA = this.jitterAlpha * jitterMs + (1 - this.jitterAlpha) * this.jitterEMA;
+                    this.jitterVarianceEMA = this.jitterAlpha * (jitterMs * jitterMs) + (1 - this.jitterAlpha) * this.jitterVarianceEMA;
+                }
+
+                // Store in history (rolling window)
+                this.jitterHistory.push(jitterMs);
+                if (this.jitterHistory.length > this.maxJitterHistorySize) {
+                    this.jitterHistory.shift();
+                }
+            }
+
+            // Set expected time for next chunk
+            this.expectedNextChunkTime = nowMs + this.expectedChunkInterval;
+            this.lastChunkTime = nowMs;
+            this.chunksReceived++;
+
             // Receive audio chunk from main thread
             // data.samples is Float32Array of stereo samples (LRLRLR...)
             const samples = data.samples;
@@ -46,7 +93,11 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
 
             this.writeIndex = (this.writeIndex + samples.length) % this.internalBuffer.length;
         } else if (data.type === 'control') {
-            // Handle control messages (future: volume, etc.)
+            // Handle control messages (T029)
+            if (data.targetLatencyMs !== undefined) {
+                this.targetLatencyMs = data.targetLatencyMs;
+                console.log(`[AudioWorklet] Target latency updated: ${this.targetLatencyMs}ms`);
+            }
         }
     }
 
@@ -114,15 +165,37 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
 
         // Send status to main thread (throttled)
         if (this.frameCount % 4800 === 0) { // Every ~100ms at 48kHz
+            // Calculate jitter std deviation
+            const jitterStd = this.getJitterStd();
+
             this.port.postMessage({
                 type: 'status',
                 bufferDepthMs: bufferDepthMs,
                 playbackRate: this.playbackRate,
                 underrunCount: this.underrunCount,
+                // Jitter metrics (T030)
+                jitterMeanMs: this.jitterEMA,
+                jitterStdMs: jitterStd,
+                chunksReceived: this.chunksReceived,
+                underrunRate: this.underrunCount / Math.max(this.chunksReceived, 1),
             });
         }
 
         return true; // Keep processor alive
+    }
+
+    getJitterStd() {
+        /**
+         * Calculate jitter standard deviation from EMA variance (T030).
+         *
+         * Returns:
+         *     Standard deviation in milliseconds
+         */
+        if (this.jitterVarianceEMA <= this.jitterEMA * this.jitterEMA) {
+            return 0;
+        }
+        const variance = this.jitterVarianceEMA - (this.jitterEMA * this.jitterEMA);
+        return Math.sqrt(Math.max(0, variance));
     }
 }
 
