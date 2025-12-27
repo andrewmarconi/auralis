@@ -43,6 +43,8 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "loguru>=0.7.3", # Enhanced structured logging
     "httpx>=0.28.0", # For async HTTP (testing & potential API calls)
+    "prometheus-client>=0.23.1",
+    "psutil>=7.2.0",
 ]
 
 [project.optional-dependencies]

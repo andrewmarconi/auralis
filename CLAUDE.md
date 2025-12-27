@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Auralis is a real-time generative ambient music engine that composes and streams evolving soundscapes using Python 3.12+, FastAPI, PyTorch, and torchsynth. The system generates continuous, non-repeating ambient music through Markov chord progressions, constraint-based melodies, and GPU-accelerated synthesis, streaming audio at 44.1kHz/16-bit PCM over WebSockets.
 
+**Note**: Python 3.12+ is required (as specified in pyproject.toml).
+
 ## Core Architecture
 
 The system follows a strict modular pipeline:
@@ -55,9 +57,6 @@ uv pip install -e ".[dev]"
 # Development server with auto-reload
 uvicorn server.main:app --reload --host 0.0.0.0 --port 8000
 
-# Quick-start alternative
-python main.py
-
 # Production server (multi-worker)
 uvicorn server.main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
@@ -68,31 +67,31 @@ uvicorn server.main:app --host 0.0.0.0 --port 8000 --workers 4
 pytest
 
 # Coverage report (HTML + terminal)
-pytest --cov=auralis --cov-report=html --cov-report=term
-
-# Specific test file
-pytest tests/unit/test_chord_generator.py
+pytest --cov=server --cov=composition --cov-report=html --cov-report=term
 
 # Integration tests only (audio performance tests)
 pytest tests/integration/ -v
 
 # Performance benchmarks
 pytest tests/performance/ -v
+
+# Specific test file (when unit tests exist)
+# pytest tests/unit/test_chord_generator.py
 ```
 
 ### Code Quality
 ```bash
 # Format code (Black)
-black auralis/ tests/
+black server/ composition/ tests/
 
 # Lint (Ruff)
-ruff check auralis/ tests/
+ruff check server/ composition/ tests/
 
 # Type checking (mypy)
-mypy auralis/ --strict
+mypy server/ composition/ --strict
 
 # Run all quality checks
-black auralis/ tests/ && ruff check auralis/ tests/ && mypy auralis/ --strict
+black server/ composition/ tests/ && ruff check server/ composition/ tests/ && mypy server/ composition/ --strict
 ```
 
 ### Dependency Management
@@ -155,8 +154,9 @@ auralis/
 ├── server/                    # FastAPI server & synthesis
 │   ├── main.py               # App entrypoint, startup/shutdown
 │   ├── synthesis_engine.py   # torchsynth GPU rendering
+│   ├── streaming_server.py   # WebSocket streaming logic
 │   ├── ring_buffer.py        # Thread-safe audio buffer
-│   └── streaming_server.py   # WebSocket streaming logic
+│   └── presets.py            # Generation presets and parameter history
 │
 ├── composition/              # Musical generation algorithms
 │   ├── chord_generator.py   # Markov chord progressions
@@ -166,7 +166,8 @@ auralis/
 ├── client/                   # Web Audio API client
 │   ├── index.html           # UI with controls
 │   ├── audio_client_worklet.js      # AudioContext setup
-│   └── audio_worklet_processor.js   # Audio thread processor
+│   ├── audio_worklet_processor.js   # Audio thread processor
+│   └── debug.html           # Debug interface for development
 │
 ├── tests/
 │   ├── integration/         # WebSocket, latency, GPU tests
@@ -178,20 +179,21 @@ auralis/
 │   ├── implementation_plan.md     # Development roadmap
 │   └── technical_specifications.md
 │
-├── specs/001-phase1-mvp/    # Current feature specification
-│   ├── spec.md              # User stories, requirements
-│   ├── plan.md              # Implementation plan
-│   ├── tasks.md             # Task breakdown
-│   ├── data-model.md        # Data structures
-│   ├── quickstart.md        # Testing scenarios
-│   └── contracts/           # API contracts
+├── specs/                   # Feature specifications (multiple can coexist)
+│   ├── 001-phase1-mvp/      # MVP implementation
+│   ├── 002-enhanced-generation-controls/  # Enhanced controls
+│   └── 003-performance-optimizations/     # Current feature
+│       ├── spec.md          # User stories, requirements
+│       ├── plan.md          # Implementation plan (if generated)
+│       ├── tasks.md         # Task breakdown (if generated)
+│       └── checklists/      # Quality validation checklists
 │
 ├── .specify/                # SpecKit workflow templates
 │   ├── memory/constitution.md    # Project constitution
 │   └── templates/           # Spec/plan/task templates
 │
 ├── pyproject.toml           # Project metadata, dependencies
-├── main.py                  # Quick-start development entrypoint
+├── main.py                  # Placeholder entry point (use uvicorn instead)
 └── README.md               # Project overview
 ```
 
@@ -237,19 +239,20 @@ device = torch.device("mps" if torch.backends.mps.is_available()
 **Use absolute imports only**:
 ```python
 # ✅ Correct
-from auralis.core.config import config
-from auralis.composition.engine import CompositionEngine
 from server.main import app
+from composition.chord_generator import ChordGenerator
+from composition.melody_generator import MelodyGenerator
 
 # ❌ Wrong
-from ..core.config import config  # No relative imports
-from core.config import config     # Missing package prefix
+from ..composition.chord_generator import ChordGenerator  # No relative imports
+from chord_generator import ChordGenerator  # Missing package prefix
 ```
 
 **Package-level exports** (defined in `__init__.py`):
 ```python
 # Clean imports from public API
-from auralis.composition import CompositionEngine
+from composition import ChordGenerator, MelodyGenerator
+from server import SynthesisEngine
 ```
 
 ## Type Annotations
@@ -318,12 +321,12 @@ specs/[###-feature-name]/
 1. Create module in `composition/` (e.g., `new_generator.py`)
 2. Follow naming convention: `[Purpose]Generator` class
 3. Implement with type hints and docstrings
-4. Add unit tests in `tests/unit/test_new_generator.py`
-5. Add integration test in `tests/integration/`
+4. Add integration test in `tests/integration/`
+5. Add unit tests in `tests/unit/test_new_generator.py` (create directory if needed)
 6. Update `composition/__init__.py` exports
 
 ### Adding a WebSocket Endpoint
-1. Define endpoint in `server/websocket.py`
+1. Define endpoint in `server/main.py` or `server/streaming_server.py`
 2. Use asyncio for non-blocking operations
 3. Document contract in `specs/[feature]/contracts/websocket-api.md`
 4. Add integration test verifying latency constraints
@@ -351,7 +354,7 @@ AURALIS_LOG_LEVEL=INFO
 ### Unit Tests
 - Fast, isolated tests for individual components
 - Mock external dependencies (GPU, network)
-- Located in `tests/unit/`
+- **Note**: `tests/unit/` directory not yet created - add as needed when implementing unit tests
 
 ### Integration Tests
 - Test component interactions (composition → synthesis → streaming)
@@ -398,6 +401,10 @@ Extensive documentation in [docs/](docs/):
 ## References
 
 - **Project Constitution**: [.specify/memory/constitution.md](.specify/memory/constitution.md)
-- **Current Feature Spec**: [specs/001-phase1-mvp/spec.md](specs/001-phase1-mvp/spec.md)
+- **Feature Specifications**:
+  - [specs/001-phase1-mvp/](specs/001-phase1-mvp/) - MVP implementation
+  - [specs/002-enhanced-generation-controls/](specs/002-enhanced-generation-controls/) - Enhanced controls
+  - [specs/003-performance-optimizations/](specs/003-performance-optimizations/) - Current feature (performance optimizations)
 - **Agent Guidelines**: [AGENTS.md](AGENTS.md)
 - **Main README**: [README.md](README.md)
+- **Implementation Status**: [IMPLEMENTATION_COMPLETE.md](IMPLEMENTATION_COMPLETE.md)
