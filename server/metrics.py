@@ -99,6 +99,14 @@ class PrometheusMetrics:
             ['client_id']
         )
 
+        # Streaming Metrics (T034)
+        self.chunk_delivery_jitter_ms = Histogram(
+            'auralis_chunk_delivery_jitter_ms',
+            'Chunk delivery timing jitter in milliseconds',
+            ['client_id'],
+            buckets=[0, 1, 2, 5, 10, 20, 30, 50, 75, 100, 150, 200]
+        )
+
         # Memory Monitor Integration
         self.memory_monitor: Optional[MemoryMonitor] = None
         self.process = psutil.Process()
@@ -300,6 +308,16 @@ class PrometheusMetrics:
             depth_ms: Buffer depth in milliseconds
         """
         self.buffer_depth_ms.labels(client_id=client_id).set(depth_ms)
+
+    def record_chunk_jitter(self, client_id: str, jitter_ms: float) -> None:
+        """
+        Record chunk delivery jitter for a specific client (T034).
+
+        Args:
+            client_id: Client identifier
+            jitter_ms: Delivery jitter in milliseconds (deviation from expected 100ms interval)
+        """
+        self.chunk_delivery_jitter_ms.labels(client_id=client_id).observe(jitter_ms)
 
     def get_summary(self) -> dict:
         """

@@ -5,6 +5,8 @@ Main application entrypoint for real-time ambient music streaming.
 """
 
 import asyncio
+import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from typing import List, Optional
@@ -12,11 +14,10 @@ from typing import List, Optional
 import numpy as np
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from loguru import logger
 from pydantic import BaseModel, Field
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
-from prometheus_client.core import CollectorRegistry
 
 from server.ring_buffer import RingBuffer
 from server.streaming_server import StreamingServer
@@ -114,6 +115,69 @@ def adjust_parameters_for_performance(
     return params
 
 
+def configure_cpu_affinity() -> None:
+    """
+    Configure CPU affinity for synthesis thread (T094).
+
+    Pins the process to specific CPU cores to improve cache locality
+    and reduce context switching for real-time audio synthesis.
+    """
+    try:
+        import psutil
+
+        # Get current process
+        process = psutil.Process()
+        cpu_count = psutil.cpu_count(logical=True)
+
+        if cpu_count is None or cpu_count < 2:
+            logger.info("CPU affinity: Single core detected, skipping affinity configuration")
+            return
+
+        # Strategy: Use performance cores (first half) for audio synthesis
+        # Leave efficiency cores (second half) for OS and other processes
+        if sys.platform == "darwin":
+            # macOS: Use first half of cores (performance cores on Apple Silicon)
+            perf_cores = list(range(cpu_count // 2))
+            try:
+                # Note: macOS doesn't support process affinity via psutil
+                # This is a no-op on macOS but we document the strategy
+                logger.info(
+                    f"CPU affinity: macOS detected ({cpu_count} cores). "
+                    f"Note: macOS doesn't support manual CPU affinity. "
+                    f"OS will handle core selection automatically."
+                )
+            except Exception:
+                pass
+
+        elif sys.platform.startswith("linux"):
+            # Linux: Pin to first half of cores
+            perf_cores = list(range(cpu_count // 2)) if cpu_count >= 4 else [0, 1]
+            process.cpu_affinity(perf_cores)
+            logger.info(
+                f"✓ CPU affinity configured: Process pinned to cores {perf_cores} "
+                f"(of {cpu_count} total cores)"
+            )
+
+        elif sys.platform == "win32":
+            # Windows: Pin to first half of cores
+            perf_cores = list(range(cpu_count // 2)) if cpu_count >= 4 else [0, 1]
+            process.cpu_affinity(perf_cores)
+            logger.info(
+                f"✓ CPU affinity configured: Process pinned to cores {perf_cores} "
+                f"(of {cpu_count} total cores)"
+            )
+
+        else:
+            logger.info(f"CPU affinity: Unknown platform '{sys.platform}', skipping configuration")
+
+    except ImportError:
+        logger.warning("CPU affinity: psutil not available, skipping configuration")
+    except PermissionError:
+        logger.warning("CPU affinity: Insufficient permissions to set CPU affinity")
+    except Exception as e:
+        logger.warning(f"CPU affinity: Failed to configure ({type(e).__name__}: {e})")
+
+
 # Lifecycle Management
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -122,6 +186,9 @@ async def lifespan(app: FastAPI):
 
     # Apply real-time GC configuration (T082)
     RealTimeGCConfig.apply_realtime_config()
+
+    # Configure CPU affinity for synthesis thread (T094)
+    configure_cpu_affinity()
 
     # Initialize components
     app_state.ring_buffer = RingBuffer(
@@ -450,7 +517,6 @@ async def update_control(params: SynthesisParameters):
 # Static files for client (must be before route definitions)
 try:
     from fastapi.staticfiles import StaticFiles
-    import os
 
     client_dir = os.path.abspath("client")
     if os.path.exists(client_dir):

@@ -97,11 +97,11 @@
 
 #### Integration & Monitoring
 
-- [ ] T032 [US1] Integrate AdaptiveRingBuffer into streaming_server.py WebSocket handler
-- [ ] T033 [US1] Add buffer tier and jitter metrics to WebSocket status messages
-- [ ] T034 [US1] Add Prometheus histogram metrics for chunk delivery jitter
-- [ ] T035 [US1] Add Prometheus gauge metrics for buffer depth per client
-- [ ] T036 [US1] Create Grafana dashboard JSON for US1 metrics in docs/grafana/smooth-streaming.json
+- [X] T032 [US1] Integrate AdaptiveRingBuffer into streaming_server.py WebSocket handler
+- [X] T033 [US1] Add buffer tier and jitter metrics to WebSocket status messages
+- [X] T034 [US1] Add Prometheus histogram metrics for chunk delivery jitter
+- [X] T035 [US1] Add Prometheus gauge metrics for buffer depth per client
+- [X] T036 [US1] Create Grafana dashboard JSON for US1 metrics in docs/grafana/smooth-streaming.json
 
 **Checkpoint**: User Story 1 complete - smooth audio streaming with adaptive buffering functional and independently testable
 
@@ -182,8 +182,8 @@
 #### GPU Optimization
 
 - [X] T068 [P] [US3] Implement GPU batch processing for chord rendering in server/synthesis_engine.py
-- [ ] T069 [US3] Add torch.compile decorator to synthesis methods (requires PyTorch 2.0+)
-- [ ] T070 [US3] Implement kernel fusion for voice generation operations
+- [X] T069 [US3] Add torch.compile decorator to synthesis methods (requires PyTorch 2.0+)
+- [X] T070 [US3] Implement kernel fusion for voice generation operations
 - [X] T071 [US3] Add device-specific tuning for Metal (MPS) in server/device_selector.py
 - [X] T072 [US3] Add device-specific tuning for CUDA in server/device_selector.py
 - [X] T073 [US3] Implement batch size auto-tuning based on GPU memory
@@ -216,10 +216,10 @@
 
 #### Resource Optimization
 
-- [ ] T091 [US3] Implement object pooling for frequently allocated objects
+- [X] T091 [US3] Implement object pooling for frequently allocated objects
 - [X] T092 [US3] Add memory pre-allocation for synthesis buffers
 - [ ] T093 [US3] Optimize composition algorithms if profiling shows bottlenecks (composition/)
-- [ ] T094 [US3] Add CPU affinity settings for synthesis thread pool
+- [X] T094 [US3] Add CPU affinity settings for synthesis thread pool
 
 #### Monitoring Infrastructure
 
@@ -236,8 +236,8 @@
 
 **Purpose**: Improvements that affect multiple user stories and final validation
 
-- [ ] T099 [P] Update AGENTS.md with performance patterns and new dependencies
-- [ ] T100 [P] Update README.md with performance optimization details
+- [X] T099 [P] Update AGENTS.md with performance patterns and new dependencies
+- [X] T100 [P] Update README.md with performance optimization details
 - [ ] T101 [P] Create performance tuning guide in docs/performance/tuning-guide.md
 - [ ] T102 [P] Create troubleshooting guide for common performance issues in docs/performance/troubleshooting.md
 - [ ] T103 Run full test suite: pytest tests/ -v --cov=server --cov=client
@@ -246,7 +246,7 @@
 - [ ] T106 Validate Grafana dashboards load and display metrics correctly
 - [ ] T107 Run 24-hour stability test with all optimizations enabled
 - [ ] T108 Create performance optimization summary report in docs/performance/optimization-summary.md
-- [ ] T109 Code cleanup: Remove debug logging, unused imports, dead code
+- [X] T109 Code cleanup: Remove debug logging, unused imports, dead code
 - [ ] T110 Security review: Validate rate limiting, input validation, resource limits
 - [ ] T111 [P] Update type hints across all modified files
 - [ ] T112 [P] Add docstrings to all public methods

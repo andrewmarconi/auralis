@@ -36,5 +36,4 @@ class ParameterHistory(BaseModel):
     
     def get_recent_changes(self, limit: int = 10) -> List[Dict]:
         """Get recent parameter changes."""
-        return self.changes[-limit:]</content>
-<parameter name="filePath">/Users/andrew/Develop/auralis/server/presets.py
+        return self.changes[-limit:]

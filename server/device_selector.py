@@ -53,7 +53,7 @@ class DeviceSelector:
             try:
                 device = torch.device("mps")
                 # Verify device works with test tensor
-                test_tensor = torch.zeros(1, device=device)
+                _ = torch.zeros(1, device=device)  # Device verification test
                 logger.info("✓ Metal (MPS) device detected and verified")
                 return device
             except Exception as e:
@@ -64,7 +64,7 @@ class DeviceSelector:
             try:
                 device = torch.device("cuda")
                 # Verify device works with test tensor
-                test_tensor = torch.zeros(1, device=device)
+                _ = torch.zeros(1, device=device)  # Device verification test
                 gpu_name = torch.cuda.get_device_name(0)
                 logger.info(f"✓ CUDA device detected: {gpu_name}")
                 return device

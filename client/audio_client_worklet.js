@@ -197,6 +197,11 @@ class AuralisAudioClient {
                     this.chunksReceivedSinceLastAdjustment = 0;
                 }
             }
+
+            // Notify UI of updated status (T030)
+            if (this.onStatusUpdate) {
+                this.onStatusUpdate(this.getStatus());
+            }
         } else if (data.type === 'ready') {
             console.log('[Client] AudioWorklet ready');
         }
@@ -291,7 +296,8 @@ class AuralisAudioClient {
          * @returns {Object} Status object with metrics
          */
         return {
-            isConnected: this.isConnected,
+            connected: this.isConnected,  // UI expects 'connected'
+            isConnected: this.isConnected,  // Keep for compatibility
             audioContextState: this.audioContext?.state,
             sampleRate: this.audioContext?.sampleRate,
             bufferDepthMs: this.currentBufferDepthMs,

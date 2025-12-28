@@ -16,17 +16,21 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
 
         // Ring buffer for audio data (shared with main thread via SharedArrayBuffer)
         // For now, use message passing - SharedArrayBuffer requires COOP/COEP headers
-        this.internalBuffer = new Float32Array(44100 * 2); // 2 seconds, stereo interleaved
+        this.internalBuffer = new Float32Array(44100 * 6); // 3 seconds stereo interleaved (increased for stability)
         this.writeIndex = 0;
         this.readIndex = 0;
 
         // Playback rate adaptation
-        this.targetLatencyMs = 400;
+        this.targetLatencyMs = 500;  // Increased from 400ms for more stable playback
         this.playbackRate = 1.0;
 
         // Statistics
         this.underrunCount = 0;
         this.frameCount = 0;
+
+        // Prebuffering state
+        this.isPreBuffering = true;  // Wait for buffer to fill before playing
+        this.preBufferTargetMs = 800;  // Wait for 800ms of audio before starting
 
         // Jitter tracking (T030)
         this.expectedNextChunkTime = null; // Expected time for next chunk delivery
@@ -51,8 +55,8 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
     handleMessage(data) {
         if (data.type === 'audio') {
             // Track jitter (T030)
-            // Use performance.now() since we're in a message handler, not process()
-            const nowMs = performance.now();
+            // Use Date.now() for timing in AudioWorklet context
+            const nowMs = Date.now();
 
             if (this.expectedNextChunkTime !== null) {
                 // Calculate jitter (deviation from expected delivery time)
@@ -116,13 +120,28 @@ class AuralisAudioProcessor extends AudioWorkletProcessor {
         let bufferDepth = (this.writeIndex - this.readIndex + this.internalBuffer.length) % this.internalBuffer.length;
         const bufferDepthMs = (bufferDepth / 2) / 44.1; // Divide by 2 (stereo), then convert to ms
 
-        // Adaptive playback rate
-        if (bufferDepthMs > this.targetLatencyMs * 1.5) {
-            // Buffer too full - speed up playback slightly
-            this.playbackRate = 1.005;
-        } else if (bufferDepthMs < this.targetLatencyMs * 0.5) {
-            // Buffer running low - slow down playback
-            this.playbackRate = 0.995;
+        // Prebuffering: wait for buffer to fill before starting playback
+        if (this.isPreBuffering) {
+            if (bufferDepthMs >= this.preBufferTargetMs) {
+                this.isPreBuffering = false;
+                console.log(`[AudioWorklet] Prebuffering complete, starting playback (buffer: ${bufferDepthMs.toFixed(0)}ms)`);
+            } else {
+                // Output silence while prebuffering
+                for (let i = 0; i < framesToRender; i++) {
+                    outputL[i] = 0;
+                    outputR[i] = 0;
+                }
+                return true;
+            }
+        }
+
+        // Adaptive playback rate (gentle adjustments to avoid artifacts)
+        if (bufferDepthMs > this.targetLatencyMs * 1.8) {
+            // Buffer too full - speed up playback very slightly
+            this.playbackRate = 1.002;
+        } else if (bufferDepthMs < this.targetLatencyMs * 0.3) {
+            // Buffer running low - slow down playback very slightly
+            this.playbackRate = 0.998;
         } else {
             // Normal playback
             this.playbackRate = 1.0;
