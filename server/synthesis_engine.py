@@ -5,6 +5,7 @@ Real-time ambient music synthesis using torchsynth with Metal/CUDA acceleration.
 """
 
 from typing import Optional
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -13,6 +14,8 @@ from numpy.typing import NDArray
 import math
 
 from server.device_selector import DeviceSelector
+from server.fluidsynth_renderer import FluidSynthRenderer
+from server.soundfont_manager import SoundFontManager
 
 
 class GPUDeviceManager:
@@ -572,6 +575,15 @@ class SynthesisEngine:
         self.kick_voice = KickVoice(sample_rate=sample_rate, device=self.device)
         self.swell_voice = SwellVoice(sample_rate=sample_rate, device=self.device)
 
+        # Initialize FluidSynth renderer for realistic instruments (T021)
+        soundfont_manager = SoundFontManager()
+        soundfont_path = soundfont_manager.get_soundfont_path("FluidR3_GM.sf2")
+        self.fluidsynth_renderer = FluidSynthRenderer(
+            sample_rate=sample_rate,
+            soundfont_path=soundfont_path
+        )
+        logger.info("✓ FluidSynth renderer initialized for realistic piano timbres")
+
         logger.info("✓ Ambient pad, lead, and percussion voices initialized")
 
         # Apply torch.compile optimization (T069)
@@ -943,7 +955,10 @@ class SynthesisEngine:
         num_samples: int,
     ) -> torch.Tensor:
         """
-        Render melody as lead voice.
+        Render melody using FluidSynth realistic piano (T022).
+
+        Now uses sample-based Acoustic Grand Piano (GM preset 0) instead of
+        oscillator-based synthesis for authentic instrument timbres.
 
         Args:
             audio: Existing audio buffer to add to
@@ -951,30 +966,38 @@ class SynthesisEngine:
             num_samples: Total buffer length
 
         Returns:
-            Audio buffer with melody lead added
+            Audio buffer with realistic piano melody added
         """
-        for onset_sample, pitch_midi, velocity, duration_sec in melody:
-            if onset_sample >= num_samples:
-                continue
+        if not melody:
+            return audio
 
-            # Calculate note duration in samples
-            duration_samples = int(duration_sec * self.sample_rate)
-            end_sample = min(onset_sample + duration_samples, num_samples)
-            actual_duration = end_sample - onset_sample
+        # Calculate total phrase duration for FluidSynth renderer
+        duration_sec = num_samples / self.sample_rate
 
-            if actual_duration <= 0:
-                continue
+        # Render melody using FluidSynth piano (GM preset 0, channel 0)
+        piano_audio = self.fluidsynth_renderer.render_notes(
+            note_events=melody,
+            duration_sec=duration_sec,
+            channel=FluidSynthRenderer.CHANNEL_PIANO
+        )
 
-            # Generate lead voice
-            pitch_tensor = torch.tensor(pitch_midi, dtype=torch.float32, device=self.device)
-            lead_signal = self.lead_voice(
-                pitch=pitch_tensor,
-                duration_samples=actual_duration,
-                velocity=velocity,
-            )
+        # Convert FluidSynth stereo output to mono by averaging channels (T023)
+        # FluidSynth returns (2, num_samples) stereo, we need mono for mixing
+        piano_mono = (piano_audio[0] + piano_audio[1]) / 2.0
 
-            # Add to buffer
-            audio[onset_sample:end_sample] += lead_signal
+        # Convert numpy array to torch tensor for mixing with PyTorch synthesis
+        piano_tensor = torch.from_numpy(piano_mono).to(self.device)
+
+        # Apply gain compensation for FluidSynth's quiet output
+        # FluidSynth piano naturally outputs ~0.03-0.06 amplitude
+        # Boost by 12x to bring it to audible levels (~0.36-0.72)
+        # This makes melody prominent in the mix (per spec: 50% melody weight)
+        piano_gain = 12.0
+        piano_tensor = piano_tensor * piano_gain
+
+        # Ensure audio length matches (FluidSynth might return slightly different length)
+        actual_length = min(len(piano_tensor), num_samples)
+        audio[:actual_length] += piano_tensor[:actual_length]
 
         return audio
 

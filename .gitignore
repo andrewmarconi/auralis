@@ -47,3 +47,6 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
+# SoundFont files (large SF2 files excluded from git)
+soundfonts/*.sf2

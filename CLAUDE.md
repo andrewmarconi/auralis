@@ -408,3 +408,9 @@ Extensive documentation in [docs/](docs/):
 - **Agent Guidelines**: [AGENTS.md](AGENTS.md)
 - **Main README**: [README.md](README.md)
 - **Implementation Status**: [IMPLEMENTATION_COMPLETE.md](IMPLEMENTATION_COMPLETE.md)
+
+## Active Technologies
+- Python 3.12+ via uv (004-fluidsynth-integration)
+
+## Recent Changes
+- 004-fluidsynth-integration: Added Python 3.12+ via uv

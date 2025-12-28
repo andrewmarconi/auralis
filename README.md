@@ -105,6 +105,16 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 # Install project in development mode
 uv pip install -e ".[dev]"
 
+# Download SoundFont files for realistic instruments
+# The server requires FluidR3_GM.sf2 (142MB) in the soundfonts/ directory
+#
+# Download manually from one of these sources:
+# 1. Musical Artifacts: https://musical-artifacts.com/artifacts/738
+# 2. Polyphone: https://www.polyphone.io/en/soundfonts/instrument-sets/250-fluidr3-gm
+# 3. Or search "FluidR3_GM.sf2 download" for alternative sources
+#
+# Save the downloaded .sf2 file to: soundfonts/FluidR3_GM.sf2
+
 # Run the development server
 uvicorn server.main:app --reload
 

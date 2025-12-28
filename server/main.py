@@ -23,6 +23,7 @@ from server.ring_buffer import RingBuffer
 from server.streaming_server import StreamingServer
 from server.synthesis_engine import SynthesisEngine
 from server.gc_config import RealTimeGCConfig
+from server.soundfont_manager import SoundFontManager, SoundFontValidationError
 
 
 # Configuration Models
@@ -189,6 +190,20 @@ async def lifespan(app: FastAPI):
 
     # Configure CPU affinity for synthesis thread (T094)
     configure_cpu_affinity()
+
+    # Validate SoundFont files before initializing synthesis engine (FR-016, T016-T017)
+    logger.info("Validating SoundFont files...")
+    try:
+        soundfont_manager = SoundFontManager()
+        soundfont_manager.validate_all_soundfonts()
+        logger.info("✓ SoundFont validation passed")
+    except SoundFontValidationError as e:
+        logger.error(f"✗ SoundFont validation failed:\n{e}")
+        logger.error("Server startup aborted. Please download required SoundFont files.")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"✗ Unexpected error during SoundFont validation: {e}")
+        sys.exit(1)
 
     # Initialize components
     app_state.ring_buffer = RingBuffer(
