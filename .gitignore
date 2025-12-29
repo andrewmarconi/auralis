@@ -49,4 +49,5 @@ logs/
 *.temp
 
 # SoundFont files (large SF2 files excluded from git)
-soundfonts/*.sf2
+soundfonts/**/*.sf2
+*.sf2
