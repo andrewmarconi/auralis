@@ -1,63 +1,115 @@
-"""Abstract interface for ring buffer implementations."""
+"""Buffer interface definitions for audio chunk management."""
 
 from abc import ABC, abstractmethod
-from typing import Optional
-import numpy as np
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from server.audio_chunk import AudioChunk
 
 
 class IRingBuffer(ABC):
-    """Abstract interface for ring buffer implementations."""
+    """Thread-safe ring buffer for audio chunks."""
 
     @abstractmethod
-    def write_chunk(self, chunk: np.ndarray) -> int:
-        """
-        Write audio chunk to buffer.
+    def write(self, chunk: "AudioChunk") -> bool:
+        """Add chunk to buffer.
 
         Args:
-            chunk: Audio data (int16, stereo interleaved)
+            chunk: Audio chunk to write
 
         Returns:
-            Chunk ID (write position)
+            True if written, False if buffer full
 
-        Raises:
-            BufferFullError: If buffer is full and cannot accept writes
+        Thread-safe: Uses internal lock
         """
         pass
 
     @abstractmethod
-    def read_chunk(self) -> Optional[np.ndarray]:
-        """
-        Read next audio chunk from buffer.
+    def read(self) -> Optional["AudioChunk"]:
+        """Remove chunk from buffer.
 
         Returns:
-            Audio chunk or None if no data available
+            AudioChunk if available, None if empty
 
-        Raises:
-            BufferUnderrunError: If buffer is empty when read expected
+        Thread-safe: Uses internal lock
         """
         pass
 
     @abstractmethod
     def get_depth(self) -> int:
-        """
-        Get current buffer depth.
+        """Return current buffer depth (number of buffered chunks).
 
         Returns:
-            Number of chunks available for reading
+            Integer in range [0, capacity]
         """
         pass
 
     @abstractmethod
-    def get_capacity(self) -> int:
-        """
-        Get buffer capacity.
+    def is_full(self) -> bool:
+        """Check if buffer is full (write would fail).
 
         Returns:
-            Maximum number of chunks buffer can hold
+            True if full, False otherwise
+        """
+        pass
+
+    @abstractmethod
+    def is_empty(self) -> bool:
+        """Check if buffer is empty (read would return None).
+
+        Returns:
+            True if empty, False otherwise
         """
         pass
 
     @abstractmethod
     def clear(self) -> None:
-        """Clear all buffered data."""
+        """Remove all chunks from buffer.
+
+        Thread-safe: Uses internal lock
+        """
+        pass
+
+
+class IBufferManager(ABC):
+    """Manages back-pressure logic and buffer health monitoring."""
+
+    @abstractmethod
+    async def apply_back_pressure(self, current_depth: int, capacity: int) -> None:
+        """Apply back-pressure when buffer depth is low.
+
+        Args:
+            current_depth: Current number of chunks in buffer
+            capacity: Maximum buffer capacity
+
+        Behavior:
+            - If depth < 2: Sleep 10ms to allow consumer to catch up
+            - Otherwise: No delay
+        """
+        pass
+
+    @abstractmethod
+    def should_generate(self, current_depth: int, capacity: int) -> bool:
+        """Check if generation should proceed based on buffer depth.
+
+        Args:
+            current_depth: Current number of chunks in buffer
+            capacity: Maximum buffer capacity
+
+        Returns:
+            True if generation should proceed, False to wait
+        """
+        pass
+
+    @abstractmethod
+    def get_buffer_health(self, current_depth: int, capacity: int) -> str:
+        """Get buffer health status.
+
+        Args:
+            current_depth: Current number of chunks in buffer
+            capacity: Maximum buffer capacity
+
+        Returns:
+            Health status: "emergency", "low", "healthy", or "full"
+        """
         pass

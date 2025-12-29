@@ -1,118 +1,168 @@
 [project]
-name = "Auralis"
-version = "0.1.0"
-description = "Real-time Generative Ambient Music in Python"
-readme = "README.md"
+name = "auralis"
+version = "2.0.0"
+description = "Real-time generative ambient music streaming engine"
+readme = "PRD.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
-    {name = "Andrew Marconi", email = "andrew@example.com"}
+    {name = "Auralis Team"}
 ]
-keywords = ["generative-music", "ambient", "audio-synthesis", "real-time", "streaming"]
+keywords = ["audio", "music", "generative", "ambient", "streaming", "fluidsynth", "websocket"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio",
     "Topic :: Multimedia :: Sound/Audio :: Sound Synthesis",
 ]
 
 dependencies = [
-    # Core web framework and async support
-    "fastapi>=0.127.0,<0.128", # Latest stable as of Dec 2025
-    "uvicorn[standard]>=0.40.0,<0.41", # Latest with WebSocket improvements
-    "websockets>=13.0,<14.0",
-    "python-multipart>=0.0.18",
-    "pydantic>=2.12.0,<3.0", # Latest v2 with Python 3.14 support
-    "pydantic-settings>=2.6.0", # For settings management
-    # Audio synthesis and processing
-    "torch>=2.5.0,<3.0", # Latest PyTorch 2.x with MPS & CUDA support
-    "torchaudio>=2.5.0,<3.0",
-    "torchsynth>=1.0.2", # Latest available (inactive project, pinned)
-    "numpy>=1.26.0,<3.0", # NumPy 2.x compatible
-    "scipy>=1.14.0,<2.0",
-    # Advanced audio processing
-    "pedalboard>=0.9.19", # Spotify's library, Python 3.10-3.14 support
-    # Machine learning for melody generation (Phase 2)
-    "transformers>=4.57.0,<5.0", # Latest stable HuggingFace
-    "accelerate>=1.2.0", # For optimized model loading
-    "safetensors>=0.4.0", # Safe model serialization
-    # Audio codec (Phase 3) - Optional for compression
-    # "opuslib>=3.0.0; platform_system!='Windows'",  # Opus codec (Linux/macOS only) - commented out for MVP
-    # Utilities
-    "python-dotenv>=1.0.1",
-    "loguru>=0.7.3", # Enhanced structured logging
-    "httpx>=0.28.0", # For async HTTP (testing & potential API calls)
-    "prometheus-client>=0.23.1",
+    "fastapi==0.127.0",
+    "uvicorn==0.40.0",
+    "pydantic==2.12.0",
+    "numpy>=1.26.0",
+    "scipy>=1.11.0",
+    "pyfluidsynth>=1.3.2",
+    "pydantic-settings>=2.12.0",
+    "torch>=2.9.1",
     "psutil>=7.2.0",
-    "tabulate>=0.9.0",
-    "requests>=2.32.5",
-    "pyfluidsynth>=1.3.4",
+    "websockets>=15.0.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-    # Testing
     "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.1.0",
-    "pytest-mock>=3.12.0",
-    "httpx>=0.25.0",  # For testing FastAPI
-
-    # Code quality
-    "ruff>=0.1.0",  # Linting and formatting
-    "mypy>=1.7.0",  # Type checking
-    "black>=23.11.0",
-
-    # Development tools
-    "ipython>=8.17.0",
-    "jupyter>=1.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.7.0",
+    "ruff>=0.0.280",
+    "mypy>=1.4.0",
 ]
-
-# CUDA-specific dependencies (Linux with NVIDIA GPU)
-# Note: Install CUDA-enabled PyTorch separately using:
-# uv pip install torch==2.5.0+cu121 torchaudio==2.5.0+cu121 --index-url https://download.pytorch.org/whl/cu121
-cuda = [
-    # Placeholder for CUDA dependencies (requires special index)
-]
-
-[project.urls]
-Homepage = "https://github.com/yourusername/auralis"
-Documentation = "https://github.com/yourusername/auralis/docs"
-Repository = "https://github.com/yourusername/auralis"
-Issues = "https://github.com/yourusername/auralis/issues"
 
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-include = ["server*", "composition*", "tests*"]
-exclude = ["specs*", "client*", "deployment*", "docs*", ".specify*", ".claude*", ".opencode*", "auralis*"]
+[tool.hatch.build.targets.wheel]
+packages = ["server", "composition", "tests"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-addopts = "-v --cov=auralis --cov-report=html --cov-report=term"
+[tool.black]
+line-length = 100
+target-version = ['py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-select = ["E", "F", "I", "N", "W", "B", "ANN", "S"]
-ignore = ["ANN101", "ANN102", "S101"]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex (we'll manage this manually)
+]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]  # Allow unused imports in __init__.py
 
 [tool.mypy]
 python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
-plugins = ["pydantic.mypy"]
+disallow_any_unimported = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+check_untyped_defs = true
+strict_equality = true
 
-[tool.black]
-line-length = 100
-target-version = ["py312"]
+[[tool.mypy.overrides]]
+module = "fluidsynth.*"
+ignore_missing_imports = true
 
-[tool.uv.workspace]
-members = [
-    "Real-time Generative Ambient Music in Python",
+[[tool.mypy.overrides]]
+module = "scipy.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = [
+    "-ra",
+    "-q",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=server",
+    "--cov=composition",
+]
+testpaths = [
+    "tests",
+]
+python_files = [
+    "test_*.py",
+    "*_test.py",
+]
+python_classes = [
+    "Test*",
+]
+python_functions = [
+    "test_*",
+]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["server", "composition"]
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+    "*/interfaces/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+    "\\.\\.\\.",
+]
+
+[dependency-groups]
+dev = [
+    "black>=25.12.0",
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.10",
 ]

@@ -1,39 +1,114 @@
+"""Musical presets for Auralis.
+
+Predefined parameter combinations for different listening contexts:
+Focus, Meditation, Sleep, Bright.
 """
-Preset and parameter history data structures for enhanced generation controls.
-"""
 
-from datetime import datetime
-from typing import Dict, List
-from pydantic import BaseModel, Field
+import logging
+from typing import Dict
 
+from composition.musical_context import MusicalContext
 
-class GenerationPreset(BaseModel):
-    """Represents saved combinations of generation parameters for quick access."""
-    
-    name: str
-    parameter_values: Dict[str, float]
-    creation_date: datetime = Field(default_factory=datetime.now)
+logger = logging.getLogger(__name__)
 
 
-class ParameterHistory(BaseModel):
-    """Tracks recent parameter changes for undo/redo functionality."""
-    
-    changes: List[Dict] = []
-    max_entries: int = 50
-    
-    def add_change(self, parameter_name: str, old_value: float, new_value: float, source: str = "user"):
-        """Add a parameter change to history."""
-        change = {
-            "timestamp": datetime.now(),
-            "parameter_name": parameter_name,
-            "old_value": old_value,
-            "new_value": new_value,
-            "source": source
+# Preset definitions
+PRESETS: Dict[str, Dict[str, any]] = {
+    "focus": {
+        "name": "Focus",
+        "description": "Balanced Dorian mode for concentration and productivity",
+        "key": 62,  # D
+        "mode": "dorian",
+        "bpm": 60.0,
+        "intensity": 0.5,
+        "key_signature": "D Dorian",
+    },
+    "meditation": {
+        "name": "Meditation",
+        "description": "Calming Aeolian mode for deep relaxation",
+        "key": 60,  # C
+        "mode": "aeolian",
+        "bpm": 60.0,
+        "intensity": 0.3,
+        "key_signature": "C Aeolian (Natural Minor)",
+    },
+    "sleep": {
+        "name": "Sleep",
+        "description": "Minimal Phrygian mode for rest and sleep",
+        "key": 64,  # E
+        "mode": "phrygian",
+        "bpm": 60.0,
+        "intensity": 0.2,
+        "key_signature": "E Phrygian",
+    },
+    "bright": {
+        "name": "Bright",
+        "description": "Uplifting Lydian mode for energy and positivity",
+        "key": 67,  # G
+        "mode": "lydian",
+        "bpm": 70.0,
+        "intensity": 0.6,
+        "key_signature": "G Lydian",
+    },
+}
+
+
+def get_preset(preset_name: str) -> MusicalContext:
+    """Get preset by name.
+
+    Args:
+        preset_name: Preset name ("focus", "meditation", "sleep", "bright")
+
+    Returns:
+        MusicalContext configured for the preset
+
+    Raises:
+        KeyError: If preset name not found
+    """
+    preset_name_lower = preset_name.lower()
+
+    if preset_name_lower not in PRESETS:
+        available = ", ".join(PRESETS.keys())
+        raise KeyError(
+            f"Unknown preset: {preset_name}. Available presets: {available}"
+        )
+
+    preset = PRESETS[preset_name_lower]
+
+    logger.info(f"Loading preset: {preset['name']} - {preset['description']}")
+
+    return MusicalContext(
+        key=preset["key"],
+        mode=preset["mode"],
+        bpm=preset["bpm"],
+        intensity=preset["intensity"],
+        key_signature=preset["key_signature"],
+    )
+
+
+def list_presets() -> list[Dict[str, str]]:
+    """List all available presets.
+
+    Returns:
+        List of preset metadata dictionaries
+    """
+    return [
+        {
+            "id": preset_id,
+            "name": preset["name"],
+            "description": preset["description"],
+            "key_signature": preset["key_signature"],
+            "bpm": str(preset["bpm"]),
+            "intensity": str(preset["intensity"]),
         }
-        self.changes.append(change)
-        if len(self.changes) > self.max_entries:
-            self.changes.pop(0)
-    
-    def get_recent_changes(self, limit: int = 10) -> List[Dict]:
-        """Get recent parameter changes."""
-        return self.changes[-limit:]
+        for preset_id, preset in PRESETS.items()
+    ]
+
+
+def get_default_preset() -> MusicalContext:
+    """Get the default preset (Focus).
+
+    Returns:
+        MusicalContext for Focus preset
+    """
+    return get_preset("focus")

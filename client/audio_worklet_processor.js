@@ -1,221 +1,274 @@
 /**
- * AudioWorklet Processor for Auralis Client
+ * AudioWorklet processor for Auralis streaming playback.
  *
- * Runs in the audio rendering thread for low-latency playback.
- * Reads from ring buffer and outputs to speakers.
+ * Runs in the audio rendering thread (separate from main thread).
+ * Handles base64 PCM decoding, ring buffer management, and audio output.
  *
- * Features (T030):
- * - Jitter tracking with EMA smoothing
- * - Adaptive buffer tier management
- * - Real-time underrun detection
+ * Performance Critical: All operations must complete within 128 samples @ 44.1kHz (~2.9ms)
  */
 
-class AuralisAudioProcessor extends AudioWorkletProcessor {
+class AuralisWorkletProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
 
-        // Ring buffer for audio data (shared with main thread via SharedArrayBuffer)
-        // For now, use message passing - SharedArrayBuffer requires COOP/COEP headers
-        this.internalBuffer = new Float32Array(44100 * 6); // 3 seconds stereo interleaved (increased for stability)
+        // Ring buffer for audio chunks (stereo float32 samples)
+        this.bufferCapacity = 50; // 50 chunks = 5 seconds @ 100ms/chunk
+        this.buffer = new Array(this.bufferCapacity).fill(null);
         this.writeIndex = 0;
         this.readIndex = 0;
+        this.bufferDepth = 0;
 
-        // Playback rate adaptation
-        this.targetLatencyMs = 500;  // Increased from 400ms for more stable playback
-        this.playbackRate = 1.0;
+        // Pre-buffering state
+        this.isBuffering = true;
+        this.bufferTarget = 10; // Wait for 10 chunks (1 second) before starting
 
-        // Statistics
-        this.underrunCount = 0;
-        this.frameCount = 0;
+        // Chunk playback state
+        this.currentChunk = null;
+        this.chunkPosition = 0; // Sample position within current chunk
 
-        // Prebuffering state
-        this.isPreBuffering = true;  // Wait for buffer to fill before playing
-        this.preBufferTargetMs = 800;  // Wait for 800ms of audio before starting
-
-        // Jitter tracking (T030)
-        this.expectedNextChunkTime = null; // Expected time for next chunk delivery
-        this.lastChunkTime = null; // Actual time of last chunk
-        this.expectedChunkInterval = 100; // 100ms chunk duration
-        this.jitterEMA = 0; // Exponential moving average of jitter (ms)
-        this.jitterVarianceEMA = 0; // EMA of jitter variance
-        this.jitterAlpha = 0.1; // EMA smoothing factor
+        // Metrics
         this.chunksReceived = 0;
-        this.jitterHistory = []; // Last 50 jitter measurements
-        this.maxJitterHistorySize = 50;
+        this.underruns = 0;
+        this.lastUnderrunTime = 0;
+        this.lastSeq = -1; // Track sequence numbers for gap detection
 
-        // Listen for audio data from main thread
+        // DEBUG: Track process() calls
+        this.processCallCount = 0;
+        this.totalFramesOutput = 0;
+
+        // Listen for chunks from main thread (reduced logging for performance)
         this.port.onmessage = (event) => {
             this.handleMessage(event.data);
         };
 
-        // Send ready signal
-        this.port.postMessage({ type: 'ready' });
+        console.log('[AudioWorklet] AuralisWorkletProcessor initialized');
     }
 
-    handleMessage(data) {
-        if (data.type === 'audio') {
-            // Track jitter (T030)
-            // Use Date.now() for timing in AudioWorklet context
-            const nowMs = Date.now();
+    /**
+     * Handle messages from main thread.
+     *
+     * @param {Object} message - Message from main thread
+     * @param {string} message.type - Message type ('chunk', 'clear', 'getMetrics')
+     * @param {Object} message.chunk - Audio chunk data (for 'chunk' type)
+     */
+    handleMessage(message) {
+        switch (message.type) {
+            case 'chunk':
+                this.addChunk(message.chunk);
+                break;
 
-            if (this.expectedNextChunkTime !== null) {
-                // Calculate jitter (deviation from expected delivery time)
-                const jitterMs = Math.abs(nowMs - this.expectedNextChunkTime);
+            case 'clear':
+                this.clearBuffer();
+                break;
 
-                // Update EMA
-                if (this.jitterEMA === 0) {
-                    // First measurement
-                    this.jitterEMA = jitterMs;
-                    this.jitterVarianceEMA = jitterMs * jitterMs;
-                } else {
-                    // EMA update: new = α * x + (1-α) * old
-                    this.jitterEMA = this.jitterAlpha * jitterMs + (1 - this.jitterAlpha) * this.jitterEMA;
-                    this.jitterVarianceEMA = this.jitterAlpha * (jitterMs * jitterMs) + (1 - this.jitterAlpha) * this.jitterVarianceEMA;
-                }
+            case 'getMetrics':
+                this.sendMetrics();
+                break;
 
-                // Store in history (rolling window)
-                this.jitterHistory.push(jitterMs);
-                if (this.jitterHistory.length > this.maxJitterHistorySize) {
-                    this.jitterHistory.shift();
-                }
-            }
+            default:
+                console.warn('[AudioWorklet] Unknown message type:', message.type);
+        }
+    }
 
-            // Set expected time for next chunk
-            this.expectedNextChunkTime = nowMs + this.expectedChunkInterval;
-            this.lastChunkTime = nowMs;
+    /**
+     * Add audio chunk to ring buffer.
+     *
+     * @param {Object} chunk - Audio chunk
+     * @param {string} chunk.data - Base64-encoded PCM data (int16)
+     * @param {number} chunk.seq - Chunk sequence number
+     * @param {number} chunk.timestamp - Server timestamp
+     */
+    addChunk(chunk) {
+        // Chunk is already decoded in main thread (has left/right Float32Arrays)
+
+        // Detect gaps in sequence numbers
+        if (this.lastSeq >= 0 && chunk.seq !== this.lastSeq + 1) {
+            const gap = chunk.seq - this.lastSeq - 1;
+            console.warn(`[AudioWorklet] Gap detected! Missing ${gap} chunks (${this.lastSeq} → ${chunk.seq})`);
+        }
+        this.lastSeq = chunk.seq;
+
+        // Write to ring buffer
+        if (this.bufferDepth < this.bufferCapacity) {
+            this.buffer[this.writeIndex] = chunk;
+            this.writeIndex = (this.writeIndex + 1) % this.bufferCapacity;
+            this.bufferDepth++;
             this.chunksReceived++;
 
-            // Receive audio chunk from main thread
-            // data.samples is Float32Array of stereo samples (LRLRLR...)
-            const samples = data.samples;
-
-            // Write to ring buffer (samples are already interleaved LRLR...)
-            for (let i = 0; i < samples.length; i++) {
-                const bufferIndex = (this.writeIndex + i) % this.internalBuffer.length;
-                this.internalBuffer[bufferIndex] = samples[i];
+            // Check if we've buffered enough to start playback
+            if (this.isBuffering && this.bufferDepth >= this.bufferTarget) {
+                this.isBuffering = false;
+                console.log(`[AudioWorklet] Pre-buffering complete (${this.bufferDepth} chunks), starting playback`);
             }
 
-            this.writeIndex = (this.writeIndex + samples.length) % this.internalBuffer.length;
-        } else if (data.type === 'control') {
-            // Handle control messages (T029)
-            if (data.targetLatencyMs !== undefined) {
-                this.targetLatencyMs = data.targetLatencyMs;
-                console.log(`[AudioWorklet] Target latency updated: ${this.targetLatencyMs}ms`);
-            }
+            // Send buffer health update to main thread
+            this.port.postMessage({
+                type: 'bufferHealth',
+                depth: this.bufferDepth,
+                capacity: this.bufferCapacity,
+                chunksReceived: this.chunksReceived,
+                underruns: this.underruns,
+                isBuffering: this.isBuffering
+            });
+        } else {
+            console.warn('[AudioWorklet] Buffer overflow, dropping chunk', chunk.seq);
         }
     }
 
+    /**
+     * Decode base64 PCM chunk to stereo Float32Array.
+     *
+     * @param {Object} chunk - Audio chunk with base64 data
+     * @returns {Object} Decoded chunk { left: Float32Array, right: Float32Array, seq, timestamp }
+     */
+    decodeChunk(chunk) {
+        // Decode base64 to ArrayBuffer
+        const binaryString = atob(chunk.data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+
+        // Interpret as Int16Array (PCM)
+        const int16Data = new Int16Array(bytes.buffer);
+
+        // Deinterleave stereo samples (LRLRLR... → LL...RR...)
+        const samplesPerChannel = int16Data.length / 2;
+        const leftChannel = new Float32Array(samplesPerChannel);
+        const rightChannel = new Float32Array(samplesPerChannel);
+
+        for (let i = 0; i < samplesPerChannel; i++) {
+            // Convert int16 [-32768, 32767] to float32 [-1.0, 1.0]
+            leftChannel[i] = int16Data[i * 2] / 32768.0;
+            rightChannel[i] = int16Data[i * 2 + 1] / 32768.0;
+        }
+
+        return {
+            left: leftChannel,
+            right: rightChannel,
+            seq: chunk.seq,
+            timestamp: chunk.timestamp
+        };
+    }
+
+    /**
+     * Clear ring buffer and reset state.
+     */
+    clearBuffer() {
+        this.buffer.fill(null);
+        this.writeIndex = 0;
+        this.readIndex = 0;
+        this.bufferDepth = 0;
+        this.currentChunk = null;
+        this.chunkPosition = 0;
+
+        console.log('[AudioWorklet] Buffer cleared');
+    }
+
+    /**
+     * Send metrics to main thread.
+     */
+    sendMetrics() {
+        this.port.postMessage({
+            type: 'metrics',
+            chunksReceived: this.chunksReceived,
+            underruns: this.underruns,
+            bufferDepth: this.bufferDepth,
+            bufferCapacity: this.bufferCapacity
+        });
+    }
+
+    /**
+     * Process audio (called by Web Audio API at ~128 samples per call).
+     *
+     * @param {Array<Array<Float32Array>>} inputs - Input audio (unused)
+     * @param {Array<Array<Float32Array>>} outputs - Output audio buffers [channels][samples]
+     * @param {Object} parameters - Audio parameters (unused)
+     * @returns {boolean} True to keep processor alive
+     */
     process(inputs, outputs, parameters) {
         const output = outputs[0]; // First output
-        const outputL = output[0]; // Left channel
-        const outputR = output[1]; // Right channel
+        const leftOutput = output[0]; // Left channel
+        const rightOutput = output[1]; // Right channel
+        const framesNeeded = leftOutput.length; // Typically 128 samples
 
-        if (!outputL || !outputR) {
-            return true; // Keep processor alive
+        // If still pre-buffering, output silence
+        if (this.isBuffering) {
+            leftOutput.fill(0.0);
+            rightOutput.fill(0.0);
+            return true;
         }
 
-        const framesToRender = outputL.length; // Typically 128 frames
+        let framesWritten = 0;
 
-        // Calculate buffer depth
-        let bufferDepth = (this.writeIndex - this.readIndex + this.internalBuffer.length) % this.internalBuffer.length;
-        const bufferDepthMs = (bufferDepth / 2) / 44.1; // Divide by 2 (stereo), then convert to ms
+        while (framesWritten < framesNeeded) {
+            // If no current chunk, try to read from buffer
+            if (!this.currentChunk) {
+                if (this.bufferDepth > 0) {
+                    this.currentChunk = this.buffer[this.readIndex];
+                    this.buffer[this.readIndex] = null;
+                    this.readIndex = (this.readIndex + 1) % this.bufferCapacity;
+                    this.bufferDepth--;
+                    this.chunkPosition = 0;
+                } else {
+                    // Buffer underrun - output silence
+                    const now = Date.now() / 1000.0; // Use timestamp instead of currentTime
+                    if (now - this.lastUnderrunTime > 1.0) { // Throttle underrun logging
+                        console.warn('[AudioWorklet] Buffer underrun');
+                        this.underruns++;
+                        this.lastUnderrunTime = now;
+                    }
 
-        // Prebuffering: wait for buffer to fill before starting playback
-        if (this.isPreBuffering) {
-            if (bufferDepthMs >= this.preBufferTargetMs) {
-                this.isPreBuffering = false;
-                console.log(`[AudioWorklet] Prebuffering complete, starting playback (buffer: ${bufferDepthMs.toFixed(0)}ms)`);
-            } else {
-                // Output silence while prebuffering
-                for (let i = 0; i < framesToRender; i++) {
-                    outputL[i] = 0;
-                    outputR[i] = 0;
+                    // Fill remaining frames with silence
+                    for (let i = framesWritten; i < framesNeeded; i++) {
+                        leftOutput[i] = 0.0;
+                        rightOutput[i] = 0.0;
+                    }
+                    break;
                 }
-                return true;
+            }
+
+            // Copy samples from current chunk to output
+            if (this.currentChunk) {
+                const chunk = this.currentChunk;
+                const samplesAvailable = chunk.left.length - this.chunkPosition;
+                const samplesToWrite = Math.min(samplesAvailable, framesNeeded - framesWritten);
+
+                for (let i = 0; i < samplesToWrite; i++) {
+                    leftOutput[framesWritten + i] = chunk.left[this.chunkPosition + i];
+                    rightOutput[framesWritten + i] = chunk.right[this.chunkPosition + i];
+                }
+
+                this.chunkPosition += samplesToWrite;
+                framesWritten += samplesToWrite;
+
+                // If chunk fully consumed, clear it
+                if (this.chunkPosition >= chunk.left.length) {
+                    this.currentChunk = null;
+                    this.chunkPosition = 0;
+                }
             }
         }
 
-        // Adaptive playback rate (gentle adjustments to avoid artifacts)
-        if (bufferDepthMs > this.targetLatencyMs * 1.8) {
-            // Buffer too full - speed up playback very slightly
-            this.playbackRate = 1.002;
-        } else if (bufferDepthMs < this.targetLatencyMs * 0.3) {
-            // Buffer running low - slow down playback very slightly
-            this.playbackRate = 0.998;
-        } else {
-            // Normal playback
-            this.playbackRate = 1.0;
+        // DEBUG: Track process() calls and output
+        this.processCallCount++;
+        this.totalFramesOutput += framesWritten;
+
+        // Log every 500 process calls (~1.5 seconds @ 128 samples)
+        if (this.processCallCount % 500 === 0) {
+            const silentFrames = framesNeeded - framesWritten;
+            const percentSilent = (silentFrames / framesNeeded) * 100;
+            console.log(
+                `[AudioWorklet] Process stats: calls=${this.processCallCount}, ` +
+                `totalFrames=${this.totalFramesOutput}, thisCall=${framesWritten}/${framesNeeded}, ` +
+                `silent=${percentSilent.toFixed(1)}%, buffer=${this.bufferDepth}`
+            );
         }
 
-        // Render audio frames with adaptive rate
-        let readIndexFloat = this.readIndex;
-
-        for (let i = 0; i < framesToRender; i++) {
-            // Calculate how many samples are available
-            const available = (this.writeIndex - Math.floor(readIndexFloat) + this.internalBuffer.length) % this.internalBuffer.length;
-
-            // Check for buffer underrun (need at least 2 samples for stereo)
-            if (available < 2) {
-                // Underrun - output silence
-                outputL[i] = 0;
-                outputR[i] = 0;
-                this.underrunCount++;
-                continue;
-            }
-
-            const readPos = Math.floor(readIndexFloat) % this.internalBuffer.length;
-
-            // Read stereo sample (interleaved LRLR...)
-            const sampleL = this.internalBuffer[readPos];
-            const sampleR = this.internalBuffer[(readPos + 1) % this.internalBuffer.length];
-
-            outputL[i] = sampleL;
-            outputR[i] = sampleR;
-
-            // Advance read position by 2 (stereo) * playback rate
-            readIndexFloat += 2 * this.playbackRate;
-        }
-
-        // Update read index
-        this.readIndex = Math.floor(readIndexFloat) % this.internalBuffer.length;
-
-        // Increment frame counter
-        this.frameCount += framesToRender;
-
-        // Send status to main thread (throttled)
-        if (this.frameCount % 4800 === 0) { // Every ~100ms at 48kHz
-            // Calculate jitter std deviation
-            const jitterStd = this.getJitterStd();
-
-            this.port.postMessage({
-                type: 'status',
-                bufferDepthMs: bufferDepthMs,
-                playbackRate: this.playbackRate,
-                underrunCount: this.underrunCount,
-                // Jitter metrics (T030)
-                jitterMeanMs: this.jitterEMA,
-                jitterStdMs: jitterStd,
-                chunksReceived: this.chunksReceived,
-                underrunRate: this.underrunCount / Math.max(this.chunksReceived, 1),
-            });
-        }
-
-        return true; // Keep processor alive
-    }
-
-    getJitterStd() {
-        /**
-         * Calculate jitter standard deviation from EMA variance (T030).
-         *
-         * Returns:
-         *     Standard deviation in milliseconds
-         */
-        if (this.jitterVarianceEMA <= this.jitterEMA * this.jitterEMA) {
-            return 0;
-        }
-        const variance = this.jitterVarianceEMA - (this.jitterEMA * this.jitterEMA);
-        return Math.sqrt(Math.max(0, variance));
+        // Keep processor alive
+        return true;
     }
 }
 
-registerProcessor('auralis-audio-processor', AuralisAudioProcessor);
+// Register processor
+registerProcessor('auralis-worklet-processor', AuralisWorkletProcessor);

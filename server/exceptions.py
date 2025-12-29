@@ -1,4 +1,4 @@
-"""Base exception classes for Auralis error handling."""
+"""Custom exceptions for Auralis server."""
 
 
 class AuralisError(Exception):
@@ -7,49 +7,43 @@ class AuralisError(Exception):
     pass
 
 
-class BufferError(AuralisError):
-    """Base exception for buffer-related errors."""
-
-    pass
-
-
-class BufferFullError(BufferError):
-    """Raised when attempting to write to full buffer."""
-
-    pass
-
-
-class BufferUnderrunError(BufferError):
-    """Raised when buffer underruns during read."""
+class GenerationError(AuralisError):
+    """Error during musical composition generation."""
 
     pass
 
 
 class SynthesisError(AuralisError):
-    """Base exception for synthesis-related errors."""
+    """Error during audio synthesis/rendering."""
 
     pass
 
 
-class DeviceError(SynthesisError):
-    """Raised when GPU device initialization fails."""
+class SoundFontLoadError(SynthesisError):
+    """Error loading SoundFont file."""
 
     pass
 
 
-class EncodingError(AuralisError):
-    """Raised when chunk encoding/decoding fails."""
+class PresetError(SynthesisError):
+    """Error selecting or using SoundFont preset."""
 
     pass
 
 
-class ConnectionError(AuralisError):
-    """Raised when WebSocket connection fails."""
+class RenderError(SynthesisError):
+    """Error during audio rendering."""
 
     pass
 
 
-class RateLimitError(AuralisError):
-    """Raised when rate limit exceeded."""
+class BufferError(AuralisError):
+    """Error in ring buffer operations."""
+
+    pass
+
+
+class ConfigurationError(AuralisError):
+    """Error in server configuration."""
 
     pass

@@ -1,1 +1,1 @@
-"""Performance benchmarks for real-time audio constraints."""
+"""Performance benchmarks and latency tests."""

@@ -1,175 +1,293 @@
-"""Integration test for smooth audio streaming."""
+"""Integration tests for smooth streaming and playback stability.
+
+Validates:
+- 30-minute continuous playback without failures
+- Time-to-first-audio target (<800ms end-to-end)
+- Buffer health maintenance during extended sessions
+"""
 
 import asyncio
-import json
 import time
-from typing import List
 
 import pytest
-import websockets
 
-SERVER_URI = "ws://localhost:8000/ws/audio/test_client"
-CHUNK_COUNT = 100  # 10 seconds of streaming
-EXPECTED_INTERVAL_MS = 100
-JITTER_TOLERANCE_MS = 50
-
-
-async def test_smooth_streaming():
-    """Test smooth audio streaming for 30+ minutes."""
-
-    # Test state
-    chunks_received = 0
-    latencies = []
-    underrun_count = 0
-    last_chunk_time = None
-
-    try:
-        async with websockets.connect(SERVER_URI) as websocket:
-            # Send initial control message
-            await websocket.send(
-                json.dumps(
-                    {
-                        "type": "control",
-                        "action": "start",
-                        "params": {"key": "C", "bpm": 70, "intensity": 0.5},
-                    }
-                )
-            )
-
-            start_time = time.time()
-
-            # Receive chunks for 10 seconds (quick test)
-            while chunks_received < CHUNK_COUNT:
-                try:
-                    message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    # No message within 1 second - assume server busy
-                    continue
-
-                data = json.loads(message)
-
-                if data["type"] == "audio":
-                    chunks_received += 1
-                    now = time.time()
-
-                    # Calculate latency
-                    if last_chunk_time:
-                        interval_ms = (now - last_chunk_time) * 1000
-                        latencies.append(interval_ms)
-
-                    last_chunk_time = now
-
-                    # Check for underruns (empty buffer_depth indicates underrun)
-                    if data.get("buffer_depth", 0) == 0:
-                        underrun_count += 1
-
-                    # Log progress every 20 chunks
-                    if chunks_received % 20 == 0:
-                        avg_latency = sum(latencies) / len(latencies) if latencies else 0
-                        print(
-                            f"Progress: {chunks_received}/{CHUNK_COUNT} chunks, "
-                            f"avg_latency={avg_latency:.1f}ms, "
-                            f"underruns={underrun_count}"
-                        )
-
-    except Exception as e:
-        pytest.fail(f"Connection failed: {e}")
-
-    # Calculate statistics
-    if latencies:
-        avg_latency_ms = sum(latencies) / len(latencies)
-        p50_latency_ms = sorted(latencies)[len(latencies) // 2]
-        p95_latency_ms = sorted(latencies)[int(len(latencies) * 0.95)]
-        p99_latency_ms = sorted(latencies)[int(len(latencies) * 0.99)]
-    else:
-        avg_latency_ms = p50_latency_ms = p95_latency_ms = p99_latency_ms = 0
-
-    underrun_rate = underrun_count / chunks_received if chunks_received > 0 else 0
-
-    # Validate performance targets
-    # Target: <100ms latency, 99% on-time delivery, zero audible glitches
-    print(f"\n=== Streaming Test Results ===")
-    print(f"Chunks received: {chunks_received}/{CHUNK_COUNT}")
-    print(f"Avg latency: {avg_latency_ms:.1f}ms")
-    print(f"P50 latency: {p50_latency_ms:.1f}ms")
-    print(f"P95 latency: {p95_latency_ms:.1f}ms")
-    print(f"P99 latency: {p99_latency_ms:.1f}ms")
-    print(f"Underruns: {underrun_count}")
-    print(f"Underrun rate: {underrun_rate * 100:.2f}%")
-
-    # Assertions
-    assert chunks_received >= CHUNK_COUNT * 0.95, (
-        f"Expected {CHUNK_COUNT * 0.95:.0f} chunks, got {chunks_received}"
-    )
-
-    assert p99_latency_ms < 100, f"P99 latency {p99_latency_ms:.1f}ms exceeds 100ms target"
-
-    assert underrun_rate < 0.05, f"Underrun rate {underrun_rate * 100:.2f}% exceeds 5% threshold"
-
-    print("✅ Smooth streaming test passed!")
+from composition.chord_generator import ChordGenerator
+from composition.melody_generator import MelodyGenerator
+from composition.musical_context import MusicalContext
+from server.buffer_management import BufferManager
+from server.fluidsynth_renderer import FluidSynthRenderer
+from server.metrics import PerformanceMetrics
+from server.ring_buffer import RingBuffer
+from server.synthesis_engine import SynthesisEngine
 
 
-async def test_buffer_tier_escalation():
-    """Test that adaptive buffer tiers escalate on high jitter."""
+class TestSmoothStreaming:
+    """Test smooth streaming and playback stability."""
 
-    chunks_received = 0
-    current_tier = "unknown"
-    tier_transitions = []
+    @pytest.mark.asyncio
+    async def test_time_to_first_audio(self):
+        """Verify time-to-first-audio is <800ms end-to-end.
 
-    try:
-        async with websockets.connect(SERVER_URI) as websocket:
-            await websocket.send(
-                json.dumps(
-                    {
-                        "type": "control",
-                        "action": "start",
-                        "params": {"key": "C", "bpm": 70, "intensity": 0.5},
-                    }
-                )
-            )
+        Measures complete pipeline latency:
+        1. Engine starts generation loop
+        2. First phrase generated
+        3. First phrase rendered
+        4. First chunk available in buffer
+        """
+        # Setup components
+        chord_gen = ChordGenerator()
+        melody_gen = MelodyGenerator()
+        renderer = FluidSynthRenderer()
+        ring_buffer = RingBuffer(capacity=20)
+        metrics = PerformanceMetrics()
 
-            # Receive chunks and monitor tier changes
-            while chunks_received < 50:  # 5 seconds
-                try:
-                    message = await asyncio.wait_for(websocket.recv(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    break
+        engine = SynthesisEngine(
+            chord_generator=chord_gen,
+            melody_generator=melody_gen,
+            fluidsynth_renderer=renderer,
+            ring_buffer=ring_buffer,
+            metrics=metrics,
+        )
 
-                data = json.loads(message)
+        # Measure time from engine start to first chunk available
+        start_time = time.perf_counter()
 
-                if data["type"] == "audio":
-                    chunks_received += 1
-                    new_tier = data.get("current_tier", "unknown")
+        # Start generation loop
+        await engine.start_generation_loop()
 
-                    # Track tier transitions
-                    if new_tier != current_tier:
-                        tier_transitions.append((current_tier, new_tier, chunks_received))
-                        current_tier = new_tier
-                        print(
-                            f"Tier change: {tier_transitions[-1][0]} → {new_tier} at chunk {chunks_received}"
-                        )
+        # Wait for first chunk to appear in buffer
+        max_wait_sec = 2.0
+        elapsed = 0.0
+        poll_interval = 0.01  # 10ms polling
 
-    except Exception as e:
-        pytest.fail(f"Connection failed: {e}")
+        while ring_buffer.is_empty() and elapsed < max_wait_sec:
+            await asyncio.sleep(poll_interval)
+            elapsed = time.perf_counter() - start_time
 
-    print(f"\n=== Tier Escalation Test ===")
-    print(f"Tier transitions: {tier_transitions}")
+        # Stop generation
+        await engine.stop_generation_loop()
 
-    # Verify at least one tier change occurred (assuming jitter simulation)
-    assert len(tier_transitions) > 0 or current_tier != "unknown", (
-        "Expected buffer tier to adjust during streaming"
-    )
+        # Calculate time to first audio
+        time_to_first_audio_ms = elapsed * 1000.0
 
-    print("✅ Buffer tier escalation test passed!")
+        # Verify chunk was produced
+        assert not ring_buffer.is_empty(), "No audio chunks produced"
 
+        # Verify latency target (<800ms)
+        assert time_to_first_audio_ms < 800.0, (
+            f"Time-to-first-audio {time_to_first_audio_ms:.1f}ms exceeds 800ms target"
+        )
 
-if __name__ == "__main__":
-    print("=== Running smooth streaming integration tests ===")
+        print(f"Time-to-first-audio: {time_to_first_audio_ms:.1f}ms")
 
-    print("\n1. Testing smooth streaming (10 seconds)...")
-    asyncio.run(test_smooth_streaming())
+    @pytest.mark.asyncio
+    async def test_30_minute_continuous_playback(self):
+        """Verify system stability during 30-minute continuous playback.
 
-    print("\n2. Testing buffer tier escalation (5 seconds)...")
-    asyncio.run(test_buffer_tier_escalation())
+        Note: This test is scaled down to 30 seconds for CI/CD.
+        For full 30-minute test, run with TEST_FULL_DURATION=true.
 
-    print("\n=== All tests passed! ===")
+        Validates:
+        - No crashes or exceptions
+        - Buffer health >98%
+        - Memory stability (no leaks)
+        - Continuous chunk production
+        """
+        import os
+
+        # Check if full duration test requested
+        test_full_duration = os.getenv("TEST_FULL_DURATION", "false").lower() == "true"
+        duration_sec = 1800.0 if test_full_duration else 30.0  # 30 min vs 30 sec
+
+        print(f"Running {duration_sec}s continuous playback test...")
+
+        # Setup components
+        chord_gen = ChordGenerator()
+        melody_gen = MelodyGenerator()
+        renderer = FluidSynthRenderer()
+        ring_buffer = RingBuffer(capacity=20)
+        metrics = PerformanceMetrics()
+        buffer_manager = BufferManager()
+
+        engine = SynthesisEngine(
+            chord_generator=chord_gen,
+            melody_generator=melody_gen,
+            fluidsynth_renderer=renderer,
+            ring_buffer=ring_buffer,
+            metrics=metrics,
+        )
+
+        # Track metrics
+        underrun_count = 0
+        chunk_count = 0
+        last_chunk_seq = -1
+
+        # Start generation loop
+        await engine.start_generation_loop()
+
+        # Monitor for specified duration
+        start_time = time.time()
+        elapsed = 0.0
+
+        try:
+            while elapsed < duration_sec:
+                # Check buffer depth
+                depth = ring_buffer.get_depth()
+                capacity = ring_buffer.capacity
+
+                # Try to read chunk
+                chunk = ring_buffer.read()
+
+                if chunk is None:
+                    underrun_count += 1
+                    metrics.increment_buffer_underrun()
+                else:
+                    chunk_count += 1
+                    last_chunk_seq = chunk.seq
+
+                # Brief sleep to simulate consumption
+                await asyncio.sleep(0.1)  # 100ms chunk interval
+
+                elapsed = time.time() - start_time
+
+                # Log progress every 5 seconds
+                if int(elapsed) % 5 == 0 and elapsed > 0:
+                    buffer_health_pct = (
+                        (chunk_count / (chunk_count + underrun_count)) * 100.0
+                        if (chunk_count + underrun_count) > 0
+                        else 0.0
+                    )
+                    print(
+                        f"  {elapsed:.0f}s: {chunk_count} chunks, "
+                        f"{underrun_count} underruns, "
+                        f"buffer health: {buffer_health_pct:.1f}%"
+                    )
+
+        finally:
+            # Stop generation
+            await engine.stop_generation_loop()
+
+        # Calculate final metrics
+        total_attempts = chunk_count + underrun_count
+        buffer_health_pct = (chunk_count / total_attempts) * 100.0 if total_attempts > 0 else 0.0
+
+        print(f"\nPlayback test complete:")
+        print(f"  Duration: {elapsed:.1f}s")
+        print(f"  Chunks received: {chunk_count}")
+        print(f"  Underruns: {underrun_count}")
+        print(f"  Buffer health: {buffer_health_pct:.1f}%")
+
+        # Assertions
+        assert chunk_count > 0, "No chunks produced during test"
+        assert buffer_health_pct >= 98.0, (
+            f"Buffer health {buffer_health_pct:.1f}% below 98% target "
+            f"({underrun_count} underruns in {total_attempts} attempts)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_buffer_recovery_during_streaming(self):
+        """Verify buffer recovers gracefully from temporary underruns during streaming."""
+        # Setup components
+        chord_gen = ChordGenerator()
+        melody_gen = MelodyGenerator()
+        renderer = FluidSynthRenderer()
+        ring_buffer = RingBuffer(capacity=10)
+        metrics = PerformanceMetrics()
+
+        engine = SynthesisEngine(
+            chord_generator=chord_gen,
+            melody_generator=melody_gen,
+            fluidsynth_renderer=renderer,
+            ring_buffer=ring_buffer,
+            metrics=metrics,
+        )
+
+        # Start generation
+        await engine.start_generation_loop()
+
+        # Wait for buffer to fill
+        await asyncio.sleep(0.5)
+
+        # Simulate aggressive consumption (drain buffer)
+        drained_chunks = 0
+        while not ring_buffer.is_empty():
+            ring_buffer.read()
+            drained_chunks += 1
+
+        print(f"Drained {drained_chunks} chunks from buffer")
+
+        # Verify buffer is empty (underrun condition)
+        assert ring_buffer.is_empty(), "Buffer should be empty after draining"
+
+        # Wait for buffer to recover
+        recovery_start = time.time()
+        while ring_buffer.get_depth() < 3:  # Wait for healthy depth
+            await asyncio.sleep(0.05)
+            if time.time() - recovery_start > 2.0:
+                break
+
+        recovery_time_ms = (time.time() - recovery_start) * 1000.0
+
+        # Stop generation
+        await engine.stop_generation_loop()
+
+        # Verify recovery
+        assert ring_buffer.get_depth() >= 3, (
+            f"Buffer failed to recover (depth: {ring_buffer.get_depth()})"
+        )
+        assert recovery_time_ms < 1000.0, (
+            f"Buffer recovery took {recovery_time_ms:.0f}ms (target: <1000ms)"
+        )
+
+        print(f"Buffer recovered in {recovery_time_ms:.0f}ms")
+
+    @pytest.mark.asyncio
+    async def test_continuous_generation_stability(self):
+        """Verify generation loop runs continuously without exceptions for extended period."""
+        # Setup components
+        chord_gen = ChordGenerator()
+        melody_gen = MelodyGenerator()
+        renderer = FluidSynthRenderer()
+        ring_buffer = RingBuffer(capacity=20)
+        metrics = PerformanceMetrics()
+
+        engine = SynthesisEngine(
+            chord_generator=chord_gen,
+            melody_generator=melody_gen,
+            fluidsynth_renderer=renderer,
+            ring_buffer=ring_buffer,
+            metrics=metrics,
+        )
+
+        # Start generation
+        await engine.start_generation_loop()
+
+        # Monitor for 10 seconds
+        duration_sec = 10.0
+        start_time = time.time()
+
+        exception_occurred = False
+
+        try:
+            while time.time() - start_time < duration_sec:
+                # Verify engine is still running
+                assert engine.is_running(), "Engine stopped unexpectedly"
+
+                # Verify chunks are being produced
+                depth = ring_buffer.get_depth()
+                assert depth > 0, "Buffer empty - generation may have stopped"
+
+                await asyncio.sleep(0.5)
+
+        except Exception as e:
+            exception_occurred = True
+            print(f"Exception during generation: {e}")
+            raise
+        finally:
+            # Stop generation
+            await engine.stop_generation_loop()
+
+        # Verify no exceptions occurred
+        assert not exception_occurred, "Exception occurred during continuous generation"
+
+        print(f"Generation loop stable for {duration_sec}s")

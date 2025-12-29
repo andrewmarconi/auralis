@@ -1,269 +1,273 @@
-"""
-Constraint-Based Melody Generator
+"""Constraint-based melody generator.
 
-Generates ambient melodies that conform to harmonic constraints.
+Generates sparse ambient melodies with 70% chord tones, 25% scale notes,
+and 5% chromatic passing tones.
 """
 
+import logging
 import random
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import List
 
-import numpy as np
+from composition.chord_generator import ChordEvent, ChordProgression
+from composition.musical_context import MusicalContext
 
-
-# Scale intervals (A natural minor)
-A_MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10]  # Relative to root
-
-# Chord tone mappings (intervals from root)
-CHORD_INTERVALS = {
-    "i": [0, 3, 7],  # minor triad (root, minor 3rd, perfect 5th)
-    "iv": [5, 8, 0],  # iv chord (4th, minor 6th, root)
-    "V": [7, 11, 2],  # V chord (5th, major 7th, 2nd)
-    "VI": [8, 0, 3],  # VI chord (6th, root, minor 3rd)
-    "III": [3, 7, 10],  # III chord (minor 3rd, 5th, minor 7th)
-}
+logger = logging.getLogger(__name__)
 
 
+@dataclass
+class NoteEvent:
+    """Single note event in a melody."""
+
+    onset_time: int  # Sample offset from phrase start
+    pitch: int  # MIDI note number
+    velocity: int  # Note velocity (20-100)
+    duration: int  # Note length in samples
+
+
+@dataclass
 class MelodyPhrase:
-    """
-    Series of MIDI notes conforming to harmonic constraints.
+    """Generated melodic line."""
 
-    Attributes:
-        notes: List of (onset_sec, pitch_midi, velocity, duration_sec) tuples
-        bars: Number of bars in phrase
-        scale_intervals: Scale intervals used (relative to root)
-    """
-
-    def __init__(
-        self,
-        notes: List[Tuple[float, int, float, float]],
-        bars: int = 8,
-        scale_intervals: List[int] = A_MINOR_SCALE,
-    ):
-        """
-        Create melody phrase.
-
-        Args:
-            notes: List of (onset_sec, pitch_midi, velocity, duration_sec)
-            bars: Number of bars in phrase
-            scale_intervals: Scale intervals (relative to root)
-        """
-        self.notes = notes
-        self.bars = bars
-        self.scale_intervals = scale_intervals
-
-    def to_sample_events(self, sample_rate: int = 44100) -> List[Tuple[int, int, float, float]]:
-        """
-        Convert timing to sample-accurate events.
-
-        Args:
-            sample_rate: Audio sample rate
-
-        Returns:
-            List of (onset_sample, pitch_midi, velocity, duration_sec) tuples
-        """
-        events = []
-        for onset_sec, pitch_midi, velocity, duration_sec in self.notes:
-            onset_sample = int(onset_sec * sample_rate)
-            events.append((onset_sample, pitch_midi, velocity, duration_sec))
-        return events
+    notes: List[NoteEvent]
+    duration_samples: int
+    chord_context: ChordProgression
 
 
-class ConstrainedMelodyGenerator:
-    """
-    Generates melodies constrained to chord harmony.
+class MelodyGenerator:
+    """Generates constraint-based melodies."""
 
-    Constraint distribution:
-    - 70% chord tones (strong harmonic fit)
-    - 25% scale tones (passing notes)
-    - 5% chromatic (color tones)
-    """
+    # Chord intervals (semitones from root)
+    CHORD_INTERVALS = {
+        "major": [0, 4, 7],
+        "minor": [0, 3, 7],
+        "sus2": [0, 2, 7],
+        "sus4": [0, 5, 7],
+        "add9": [0, 2, 4, 7],
+        "maj7": [0, 4, 7, 11],
+    }
 
-    def __init__(
-        self,
-        scale_intervals: List[int] = A_MINOR_SCALE,
-        root_midi: int = 57,  # A3
-        chord_tone_prob: float = 0.7,
-        scale_tone_prob: float = 0.25,
-        chromatic_prob: float = 0.05,
-    ):
-        """
-        Initialize melody generator.
+    # Modal scale degrees
+    MODES = {
+        "aeolian": [0, 2, 3, 5, 7, 8, 10],
+        "dorian": [0, 2, 3, 5, 7, 9, 10],
+        "lydian": [0, 2, 4, 6, 7, 9, 11],
+        "phrygian": [0, 1, 3, 5, 7, 8, 10],
+    }
+
+    def __init__(self, sample_rate: int = 44100):
+        """Initialize melody generator.
 
         Args:
-            scale_intervals: Scale intervals relative to root
-            root_midi: Root MIDI note
-            chord_tone_prob: Probability of chord tone selection
-            scale_tone_prob: Probability of scale tone selection
-            chromatic_prob: Probability of chromatic passing tone
+            sample_rate: Audio sample rate in Hz
         """
-        self.scale_intervals = scale_intervals
-        self.root_midi = root_midi
-        self.chord_tone_prob = chord_tone_prob
-        self.scale_tone_prob = scale_tone_prob
-        self.chromatic_prob = chromatic_prob
+        self.sample_rate = sample_rate
+        logger.info("Melody generator initialized")
 
-        # Validate probabilities
-        total_prob = chord_tone_prob + scale_tone_prob + chromatic_prob
-        if not np.isclose(total_prob, 1.0):
-            raise ValueError(f"Probabilities must sum to 1.0, got {total_prob}")
-
-    def generate_melody(
-        self,
-        chord_progression: List[Tuple[int, int, str]],
-        duration_sec: float,
-        bpm: int = 70,
-        intensity: float = 0.5,
-        complexity: float = 0.5,
+    def generate(
+        self, context: MusicalContext, chords: ChordProgression
     ) -> MelodyPhrase:
-        """
-        Generate melody for chord progression.
+        """Generate melody phrase.
 
         Args:
-            chord_progression: List of (onset_sample, root_midi, chord_type)
-            duration_sec: Total phrase duration in seconds
-            bpm: Tempo for note density calculation
-            intensity: Control density and range (0.0-1.0)
-            complexity: Control harmonic adherence vs chromaticism (0.0-1.0)
+            context: Musical parameters
+            chords: Chord progression for harmonic context
 
         Returns:
             MelodyPhrase with generated notes
         """
-        notes = []
+        # Calculate note probability based on intensity
+        # Lower intensity = sparser melody
+        note_probability = 0.3 + (context.intensity * 0.5)  # 0.3 to 0.8
 
-        # Adjust probabilities based on complexity
-        # Low complexity: more chord tones, high: more chromatic
-        chord_tone_prob = 0.7 - complexity * 0.4
-        scale_tone_prob = 0.25 + complexity * 0.2
-        chromatic_prob = 0.05 + complexity * 0.2
+        # Estimate number of potential note positions
+        beats_per_second = context.bpm / 60.0
+        note_grid_hz = beats_per_second * 2  # Eighth note grid
+        max_notes = int(chords.duration_samples / self.sample_rate * note_grid_hz)
 
-        # Normalize
-        total = chord_tone_prob + scale_tone_prob + chromatic_prob
-        self.chord_tone_prob = chord_tone_prob / total
-        self.scale_tone_prob = scale_tone_prob / total
-        self.chromatic_prob = chromatic_prob / total
+        notes: List[NoteEvent] = []
+        last_pitch: int | None = None  # Track for stepwise motion
 
-        # Calculate note density based on intensity
-        # Low intensity: ~0.5 notes/second (sparse)
-        # High intensity: ~2.5 notes/second (continuous)
-        notes_per_second = 0.5 + (intensity * 2.0)
+        # Generate melodic contour curve (arch shape: rise then fall)
+        # This creates intentional melodic direction
+        contour_curve = self._generate_melodic_contour(max_notes)
 
-        # Generate notes throughout duration
-        current_time = 0.0
-        while current_time < duration_sec:
-            # Find active chord at current time
-            active_chord = self._get_active_chord(current_time, chord_progression, duration_sec)
+        for i in range(max_notes):
+            # Skip note based on probability (sparse texture)
+            if random.random() > note_probability:
+                continue
 
-            # Generate note pitch constrained to harmony
-            pitch_midi = self._generate_constrained_pitch(active_chord, intensity)
+            # Calculate onset time
+            onset_time = int(i * (chords.duration_samples / max_notes))
 
-            # Note duration (ambient = longer, varied notes)
-            # Low intensity: 1-4 second notes, high: 0.5-2 second notes
-            if intensity < 0.3:
-                duration = random.uniform(2.0, 5.0)  # Very long, sustained
-            elif intensity < 0.6:
-                duration = random.uniform(1.0, 3.0)  # Medium sustained
-            else:
-                duration = random.uniform(0.5, 2.0)  # Shorter, more active
+            # Find active chord at this time
+            active_chord = self._get_active_chord(onset_time, chords)
 
-            # Velocity (ambient = softer dynamics with variation)
-            base_velocity = random.uniform(0.25, 0.5)
-            velocity = base_velocity * (0.7 + intensity * 0.3)
+            if active_chord is None:
+                continue
 
-            notes.append((current_time, pitch_midi, velocity, duration))
+            # Select pitch based on constraint distribution
+            pitch = self._select_pitch(active_chord, context, last_pitch, contour_curve[i])
+            last_pitch = pitch
 
-            # Inter-onset interval with MUCH more variation for organic, non-repetitive feel
-            # Base interval from note density
-            base_interval = 1.0 / notes_per_second
+            # Calculate velocity using dynamic curve (phrase shaping)
+            velocity = self._calculate_velocity(i, max_notes, context.intensity)
 
-            # Add substantial random variation (±50-150%)
-            variation_factor = random.uniform(0.5, 2.5)
-            interval = base_interval * variation_factor
+            # Note duration with some variation (0.5 to 1.5 seconds for ambient)
+            duration_samples = int(
+                random.uniform(0.5, 1.5) * self.sample_rate
+            )
 
-            # Occasionally add longer pauses for breathing room
-            if random.random() < 0.2:  # 20% chance
-                interval *= random.uniform(1.5, 3.0)
+            notes.append(
+                NoteEvent(
+                    onset_time=onset_time,
+                    pitch=pitch,
+                    velocity=velocity,
+                    duration=duration_samples,
+                )
+            )
 
-            interval = max(0.2, interval)  # Minimum 200ms
-            current_time += interval
+        logger.debug(
+            f"Generated {len(notes)} notes for melody "
+            f"(probability={note_probability:.2f})"
+        )
 
-        # Calculate bars from duration and BPM
-        seconds_per_bar = (60.0 / bpm) * 4
-        bars = int(duration_sec / seconds_per_bar)
-
-        return MelodyPhrase(notes, bars, self.scale_intervals)
+        return MelodyPhrase(
+            notes=notes,
+            duration_samples=chords.duration_samples,
+            chord_context=chords,
+        )
 
     def _get_active_chord(
-        self,
-        time_sec: float,
-        chord_progression: List[Tuple[int, int, str]],
-        duration_sec: float,
-    ) -> str:
-        """
-        Get active chord at specific time.
+        self, onset_time: int, chords: ChordProgression
+    ) -> ChordEvent | None:
+        """Find active chord at given time.
 
         Args:
-            time_sec: Time in seconds
-            chord_progression: List of (onset_sample, root_midi, chord_type)
-            duration_sec: Total duration
+            onset_time: Sample offset
+            chords: Chord progression
 
         Returns:
-            Chord symbol active at time_sec
+            Active ChordEvent or None
         """
-        if not chord_progression:
-            return "i"  # Default to tonic
+        active_chord: ChordEvent | None = None
 
-        # Convert time to samples for comparison
-        sample_rate = 44100  # Standard sample rate
-        time_samples = int(time_sec * sample_rate)
-
-        # Find the chord active at this time
-        # Chords are sorted by onset time
-        active_chord = chord_progression[0][2]  # Start with first chord
-
-        for onset_sample, root_midi, chord_type in chord_progression:
-            if onset_sample <= time_samples:
-                active_chord = chord_type
+        for chord in chords.chords:
+            if chord.onset_time <= onset_time:
+                active_chord = chord
             else:
-                # We've passed the current time
                 break
 
         return active_chord
 
-    def _generate_constrained_pitch(self, chord_symbol: str, intensity: float) -> int:
-        """
-        Generate MIDI pitch constrained to chord harmony.
+    def _select_pitch(
+        self, chord: "ChordEvent", context: MusicalContext, last_pitch: int | None, contour_value: float
+    ) -> int:
+        """Select pitch based on constraint distribution and melodic contour.
+
+        70% chord tones, 25% scale notes, 5% chromatic.
+        Prefers stepwise motion when last_pitch is provided.
 
         Args:
-            chord_symbol: Current chord (e.g., "i", "iv")
-            intensity: Control range and chromaticism
+            chord: Active chord
+            context: Musical context
+            last_pitch: Previous note pitch (for stepwise motion)
+            contour_value: Melodic contour direction (-1 to 1, negative=descend, positive=ascend)
 
         Returns:
-            MIDI pitch number
+            MIDI pitch
         """
-        # Sample note type based on probabilities
+        from composition.chord_generator import ChordEvent
+
         rand = random.random()
 
-        if rand < self.chord_tone_prob:
-            # Chord tone (70% probability)
-            intervals = CHORD_INTERVALS.get(chord_symbol, [0, 3, 7])
-            interval = random.choice(intervals)
-        elif rand < (self.chord_tone_prob + self.scale_tone_prob):
-            # Scale tone (25% probability)
-            interval = random.choice(self.scale_intervals)
+        # Base octave selection influenced by melodic contour
+        if contour_value > 0.5:
+            octave_offset = 24  # Higher octave
+        elif contour_value > 0:
+            octave_offset = 12  # Middle octave
         else:
-            # Chromatic passing tone (5% probability)
-            interval = random.randint(0, 11)
+            octave_offset = 0  # Lower octave
 
-        # Octave selection based on intensity
-        # Low intensity: narrow range (1 octave)
-        # High intensity: wider range (2-3 octaves)
-        octave_range = 1 + int(intensity * 2)
-        octave_offset = random.randint(0, octave_range) * 12
+        if rand < 0.70:
+            # 70% chord tones
+            intervals = self.CHORD_INTERVALS[chord.chord_type]
+            interval = random.choice(intervals)
+            pitch = chord.root_pitch + interval + octave_offset
 
-        # Construct MIDI pitch
-        pitch_midi = self.root_midi + interval + octave_offset
+        elif rand < 0.95:
+            # 25% scale notes
+            scale_degrees = self.MODES[context.mode]
+            degree = random.choice(scale_degrees)
+            pitch = context.key + degree + octave_offset
+
+        else:
+            # 5% chromatic passing tones
+            pitch = context.key + random.randint(0, 11) + octave_offset
+
+        # Prefer stepwise motion (within 3 semitones) when possible
+        if last_pitch is not None and random.random() < 0.6:  # 60% chance of stepwise
+            interval = random.choice([-2, -1, 1, 2])  # Stepwise motion
+            pitch = last_pitch + interval
 
         # Clamp to valid MIDI range
-        pitch_midi = max(21, min(127, pitch_midi))
+        return max(48, min(96, pitch))
 
-        return pitch_midi
+    def _generate_melodic_contour(self, num_positions: int) -> List[float]:
+        """Generate melodic contour curve (arch or wave shape).
+
+        Creates intentional melodic direction: rise, peak, fall.
+
+        Args:
+            num_positions: Number of note positions
+
+        Returns:
+            List of contour values (-1 to 1, negative=low, positive=high)
+        """
+        import math
+
+        contour = []
+        contour_type = random.choice(['arch', 'inverted_arch', 'wave'])
+
+        for i in range(num_positions):
+            t = i / max(1, num_positions - 1)  # 0 to 1
+
+            if contour_type == 'arch':
+                # Rise then fall (parabola)
+                value = 4 * t * (1 - t)  # Peaks at t=0.5
+            elif contour_type == 'inverted_arch':
+                # Fall then rise
+                value = -4 * t * (1 - t) + 1
+            else:  # wave
+                # Gentle sine wave
+                value = math.sin(t * math.pi * 2)
+
+            contour.append(value)
+
+        return contour
+
+    def _calculate_velocity(self, position: int, total_positions: int, intensity: float) -> int:
+        """Calculate velocity with dynamic curve for musical expression.
+
+        Creates crescendo/diminuendo shapes.
+
+        Args:
+            position: Current note position
+            total_positions: Total number of positions
+            intensity: Overall intensity (0-1)
+
+        Returns:
+            Velocity (20-100)
+        """
+        # Base velocity from intensity
+        base_velocity = int(20 + (intensity * 60))  # 20-80 range
+
+        # Add dynamic curve (crescendo to middle, diminuendo to end)
+        t = position / max(1, total_positions - 1)  # 0 to 1
+        dynamic_curve = 4 * t * (1 - t)  # Peaks at middle
+
+        # Apply curve (±20 velocity variation)
+        velocity = base_velocity + int(dynamic_curve * 20)
+
+        # Clamp to valid range
+        return max(20, min(100, velocity))
