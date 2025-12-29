@@ -1,293 +1,292 @@
-"""
-FluidSynth Renderer for Sample-Based Instrument Synthesis
+"""FluidSynth renderer for sample-based audio synthesis.
 
-Provides realistic instrument timbres using FluidSynth sample playback engine.
-Renders melodic notes, pad chords, and choir swells using pre-recorded instrument
-samples from SoundFont (SF2) files.
+Wraps the pyfluidsynth library to provide high-quality piano and pad sounds
+using SoundFont (.sf2) sample libraries.
 """
 
-import numpy as np
-import fluidsynth
-from typing import List, Tuple, Optional
+import logging
 from pathlib import Path
+from typing import Dict
+
+import fluidsynth
+import numpy as np
+
+from server.exceptions import PresetError, RenderError, SoundFontLoadError
+from server.interfaces.synthesis import IFluidSynthRenderer
+
+logger = logging.getLogger(__name__)
 
 
-class FluidSynthRenderer:
-    """
-    FluidSynth-based sample playback renderer for realistic instrument synthesis.
+class FluidSynthRenderer(IFluidSynthRenderer):
+    """FluidSynth wrapper for sample-based synthesis."""
 
-    Handles:
-    - FluidSynth initialization with 44.1kHz sample rate
-    - SoundFont loading and GM preset selection
-    - Polyphonic note rendering (MIDI-style note on/off)
-    - Audio output as stereo float32 arrays
-
-    GM Preset Mapping:
-    - Piano: GM preset 0 (Acoustic Grand Piano) on channel 0
-    - Pads: GM preset 90 (Pad Polysynth) on channel 1
-    - Choir Aahs: GM preset 52 on channel 2
-    - Voice Oohs: GM preset 53 on channel 3
-    """
-
-    # GM Preset constants
-    PRESET_PIANO = 0          # Acoustic Grand Piano
-    PRESET_PAD = 90           # Pad Polysynth
-    PRESET_CHOIR_AAHS = 52    # Choir Aahs
-    PRESET_VOICE_OOHS = 53    # Voice Oohs
-
-    # MIDI channels (0-15)
-    CHANNEL_PIANO = 0
-    CHANNEL_PAD = 1
-    CHANNEL_CHOIR_AAHS = 2
-    CHANNEL_VOICE_OOHS = 3
-
-    def __init__(self, sample_rate: int = 44100, soundfont_path: Optional[Path] = None):
-        """
-        Initialize FluidSynth renderer.
+    def __init__(self, sample_rate: int = 44100):
+        """Initialize FluidSynth synthesizer.
 
         Args:
-            sample_rate: Target sample rate (default: 44100 Hz)
-            soundfont_path: Path to SoundFont file (e.g., FluidR3_GM.sf2)
+            sample_rate: Audio sample rate in Hz (default 44.1kHz)
         """
         self.sample_rate = sample_rate
-        self.soundfont_path = soundfont_path
-        self.synth: Optional[fluidsynth.Synth] = None
-        self.sfid: Optional[int] = None
+        self.synth = fluidsynth.Synth(samplerate=float(sample_rate))
 
-        # Initialize FluidSynth
-        self._initialize_fluidsynth()
+        # Configure synthesizer settings for ambient music (BEFORE start())
+        # Set polyphony for ambient music (chords + melody with overlaps)
+        self.synth.setting('synth.polyphony', 32)  # Max 32 simultaneous voices
 
-        # Load SoundFont if provided
-        if soundfont_path:
-            self.load_soundfont(soundfont_path)
+        # Use higher gain for better internal resolution (we'll normalize after)
+        # Default is 0.2, using 2.0 for 10x higher bit depth
+        self.synth.setting('synth.gain', 2.0)
 
-    def _initialize_fluidsynth(self) -> None:
-        """
-        Initialize FluidSynth synthesizer with optimal settings.
+        # Increase audio buffer size for smoother rendering
+        self.synth.setting('audio.period-size', 1024)
+        self.synth.setting('audio.periods', 8)
 
-        Configuration:
-        - Sample rate: 44.1kHz (matches Auralis output format)
-        - Interpolation: 4th-order polynomial (high quality resampling)
-        - Polyphony: 20 simultaneous voices
-        - Voice stealing: Enabled (oldest-first with release-phase preference)
-        """
-        # Create FluidSynth instance
-        self.synth = fluidsynth.Synth(samplerate=float(self.sample_rate))
+        # Disable reverb and chorus for cleaner sound (re-enable later if needed)
+        self.synth.setting('synth.reverb.active', 0)
+        self.synth.setting('synth.chorus.active', 0)
 
-        # Configure polyphony limit (synth.polyphony=20)
-        # Note: pyfluidsynth API may vary - some settings are set at initialization
-        # Voice stealing is automatic when polyphony limit is reached
+        self.synth.start()
 
-    def load_soundfont(self, soundfont_path: Path) -> None:
-        """
-        Load SoundFont file and configure GM presets for all instrument channels.
+        # Track loaded SoundFonts
+        self.loaded_soundfonts: Dict[int, str] = {}
+
+        logger.info(
+            f"FluidSynth initialized at {sample_rate}Hz "
+            f"(polyphony=32, gain=2.0, reverb=off, chorus=off)"
+        )
+
+    def load_soundfont(self, sf2_path: str) -> int:
+        """Load SoundFont file into FluidSynth.
 
         Args:
-            soundfont_path: Path to SoundFont file
-
-        Raises:
-            RuntimeError: If SoundFont loading fails
-        """
-        if not self.synth:
-            raise RuntimeError("FluidSynth not initialized")
-
-        # Load SoundFont file
-        self.sfid = self.synth.sfload(str(soundfont_path.absolute()))
-
-        if self.sfid == -1:
-            raise RuntimeError(f"Failed to load SoundFont: {soundfont_path}")
-
-        self.soundfont_path = soundfont_path
-
-        # Configure GM presets for each instrument channel
-        self._configure_presets()
-
-    def _configure_presets(self) -> None:
-        """
-        Configure General MIDI presets for all instrument channels.
-
-        Maps GM presets to MIDI channels:
-        - Channel 0: Acoustic Grand Piano (GM preset 0)
-        - Channel 1: Pad Polysynth (GM preset 90)
-        - Channel 2: Choir Aahs (GM preset 52)
-        - Channel 3: Voice Oohs (GM preset 53)
-        """
-        if not self.synth or self.sfid is None:
-            raise RuntimeError("SoundFont not loaded")
-
-        # Piano on channel 0
-        self.synth.program_select(
-            chan=self.CHANNEL_PIANO,
-            sfid=self.sfid,
-            bank=0,
-            preset=self.PRESET_PIANO
-        )
-
-        # Pad Polysynth on channel 1
-        self.synth.program_select(
-            chan=self.CHANNEL_PAD,
-            sfid=self.sfid,
-            bank=0,
-            preset=self.PRESET_PAD
-        )
-
-        # Choir Aahs on channel 2
-        self.synth.program_select(
-            chan=self.CHANNEL_CHOIR_AAHS,
-            sfid=self.sfid,
-            bank=0,
-            preset=self.PRESET_CHOIR_AAHS
-        )
-
-        # Voice Oohs on channel 3
-        self.synth.program_select(
-            chan=self.CHANNEL_VOICE_OOHS,
-            sfid=self.sfid,
-            bank=0,
-            preset=self.PRESET_VOICE_OOHS
-        )
-
-    def render_notes(
-        self,
-        note_events: List[Tuple[int, int, float, float]],
-        duration_sec: float,
-        channel: int
-    ) -> np.ndarray:
-        """
-        Render a list of note events to audio using FluidSynth.
-
-        Args:
-            note_events: List of (onset_sample, midi_pitch, velocity, duration_sec)
-                        - onset_sample: Sample offset for note-on event
-                        - midi_pitch: MIDI note number (0-127)
-                        - velocity: Note velocity (0.0-1.0, normalized to MIDI 0-127)
-                        - duration_sec: Note duration in seconds
-            duration_sec: Total phrase duration in seconds
-            channel: MIDI channel (0-15) to render on
+            sf2_path: Absolute or relative path to .sf2 file
 
         Returns:
-            Stereo audio array, shape (2, num_samples), float32 normalized to [-1, 1]
+            SoundFont ID (for later preset selection)
+
+        Raises:
+            SoundFontLoadError: If file not found or corrupted
         """
-        if not self.synth:
-            raise RuntimeError("FluidSynth not initialized")
+        path = Path(sf2_path)
+        if not path.exists():
+            raise SoundFontLoadError(f"SoundFont file not found: {sf2_path}")
 
-        num_samples = int(self.sample_rate * duration_sec)
+        if not path.suffix.lower() == ".sf2":
+            raise SoundFontLoadError(
+                f"Invalid SoundFont file extension: {path.suffix} (expected .sf2)"
+            )
 
-        # Create events list with note-on and note-off events
-        # Each event is (sample_offset, 'on'/'off', pitch, velocity)
-        events = []
+        try:
+            sf_id = self.synth.sfload(str(path.resolve()))
+            if sf_id == -1:
+                raise SoundFontLoadError(f"Failed to load SoundFont: {sf2_path}")
 
-        for onset_sample, midi_pitch, velocity, note_duration in note_events:
-            # Note-on event
-            midi_velocity = int(velocity * 127)  # Convert 0.0-1.0 to MIDI 0-127
-            events.append((onset_sample, 'on', midi_pitch, midi_velocity))
+            self.loaded_soundfonts[sf_id] = str(path)
+            file_size_mb = path.stat().st_size / (1024 * 1024)
+            logger.info(
+                f"Loaded SoundFont: {path.name} ({file_size_mb:.1f}MB) → ID {sf_id}"
+            )
+            return sf_id
 
-            # Note-off event
-            offset_sample = onset_sample + int(note_duration * self.sample_rate)
-            events.append((offset_sample, 'off', midi_pitch, 0))
+        except Exception as e:
+            raise SoundFontLoadError(f"Error loading SoundFont {sf2_path}: {e}") from e
 
-        # Sort events by sample offset
-        events.sort(key=lambda x: x[0])
+    def select_preset(self, channel: int, sf_id: int, bank: int, preset: int) -> None:
+        """Assign SoundFont preset to MIDI channel.
 
-        # Render audio in chunks between events
-        audio_chunks = []
-        current_sample = 0
+        Args:
+            channel: MIDI channel (0-15)
+            sf_id: SoundFont ID from load_soundfont()
+            bank: Bank number (typically 0)
+            preset: Preset number (0-127, General MIDI)
 
-        for event_sample, event_type, pitch, velocity in events:
-            # Clamp event to phrase duration
-            event_sample = min(event_sample, num_samples)
+        Raises:
+            PresetError: If preset not found in SoundFont
+        """
+        if channel < 0 or channel > 15:
+            raise PresetError(f"Invalid MIDI channel: {channel} (must be 0-15)")
 
-            # Render audio from current position to event
-            if event_sample > current_sample:
-                chunk_samples = event_sample - current_sample
-                chunk = self._render_chunk(chunk_samples)
-                audio_chunks.append(chunk)
-                current_sample = event_sample
+        if sf_id not in self.loaded_soundfonts:
+            raise PresetError(
+                f"SoundFont ID {sf_id} not loaded (available: {list(self.loaded_soundfonts.keys())})"
+            )
 
-            # Trigger MIDI event
-            if event_type == 'on':
-                self.synth.noteon(channel, pitch, velocity)
-            else:
-                self.synth.noteoff(channel, pitch)
+        try:
+            result = self.synth.program_select(channel, sf_id, bank, preset)
+            if result == -1:
+                raise PresetError(
+                    f"Failed to select preset {preset} from bank {bank} "
+                    f"(SoundFont ID {sf_id})"
+                )
 
-        # Render remaining audio to fill duration
-        if current_sample < num_samples:
-            remaining_samples = num_samples - current_sample
-            final_chunk = self._render_chunk(remaining_samples)
-            audio_chunks.append(final_chunk)
+            logger.debug(
+                f"Selected preset: channel={channel}, sf_id={sf_id}, "
+                f"bank={bank}, preset={preset}"
+            )
 
-        # Concatenate all chunks with crossfading to prevent clicks/pops
-        if audio_chunks:
-            # Apply short crossfade between chunks (1ms = 44 samples at 44.1kHz)
-            # This prevents discontinuities from note-on/note-off events
-            crossfade_samples = 44  # 1ms crossfade
+        except Exception as e:
+            raise PresetError(
+                f"Error selecting preset on channel {channel}: {e}"
+            ) from e
 
-            full_audio = audio_chunks[0].copy()  # Start with copy of first chunk
+    def note_on(self, channel: int, pitch: int, velocity: int) -> None:
+        """Trigger note on MIDI channel.
 
-            for i in range(1, len(audio_chunks)):
-                next_chunk = audio_chunks[i].copy()  # Work with copy to avoid modifying original
+        Args:
+            channel: MIDI channel (0-15)
+            pitch: MIDI note number (0-127)
+            velocity: Note velocity (0-127)
+        """
+        if not (0 <= channel <= 15):
+            logger.warning(f"Invalid MIDI channel: {channel}")
+            return
 
-                # Apply crossfade if both regions are long enough
-                if full_audio.shape[1] >= crossfade_samples and next_chunk.shape[1] >= crossfade_samples:
-                    # Create fade-out envelope for end of current audio
-                    fade_out = np.linspace(1.0, 0.0, crossfade_samples).astype(np.float32)
+        if not (0 <= pitch <= 127):
+            logger.warning(f"Invalid MIDI pitch: {pitch}")
+            return
 
-                    # Create fade-in envelope for start of next chunk
-                    fade_in = np.linspace(0.0, 1.0, crossfade_samples).astype(np.float32)
+        if not (0 <= velocity <= 127):
+            velocity = max(0, min(127, velocity))
 
-                    # Apply envelopes to crossfade regions
-                    crossfade_end = full_audio[:, -crossfade_samples:] * fade_out
-                    crossfade_start = next_chunk[:, :crossfade_samples] * fade_in
+        self.synth.noteon(channel, pitch, velocity)
 
-                    # Mix the crossfade regions
-                    full_audio[:, -crossfade_samples:] = crossfade_end + crossfade_start
+    def note_off(self, channel: int, pitch: int) -> None:
+        """Release note on MIDI channel.
 
-                    # Append the rest of next_chunk (excluding the crossfaded start)
-                    full_audio = np.concatenate([full_audio, next_chunk[:, crossfade_samples:]], axis=1)
-                else:
-                    # Chunks too short for crossfade, just concatenate
-                    full_audio = np.concatenate([full_audio, next_chunk], axis=1)
+        Args:
+            channel: MIDI channel (0-15)
+            pitch: MIDI note number (0-127)
+        """
+        if not (0 <= channel <= 15):
+            logger.warning(f"Invalid MIDI channel: {channel}")
+            return
+
+        if not (0 <= pitch <= 127):
+            logger.warning(f"Invalid MIDI pitch: {pitch}")
+            return
+
+        self.synth.noteoff(channel, pitch)
+
+    def all_notes_off(self, channel: int = None) -> None:
+        """Turn off all notes on a channel or all channels.
+
+        Args:
+            channel: MIDI channel (0-15), or None for all channels
+        """
+        if channel is not None:
+            if not (0 <= channel <= 15):
+                logger.warning(f"Invalid MIDI channel: {channel}")
+                return
+            # Send MIDI CC 123 (All Notes Off)
+            self.synth.cc(channel, 123, 0)
         else:
-            # No events, return silence
-            full_audio = np.zeros((2, num_samples), dtype=np.float32)
+            # Turn off all notes on all channels
+            for ch in range(16):
+                self.synth.cc(ch, 123, 0)
 
-        # Ensure exact length (trim or pad if needed due to rounding)
-        if full_audio.shape[1] > num_samples:
-            full_audio = full_audio[:, :num_samples]
-        elif full_audio.shape[1] < num_samples:
-            padding = np.zeros((2, num_samples - full_audio.shape[1]), dtype=np.float32)
-            full_audio = np.concatenate([full_audio, padding], axis=1)
-
-        return full_audio
-
-    def _render_chunk(self, num_samples: int) -> np.ndarray:
-        """
-        Render a chunk of audio from FluidSynth.
+    def render(self, num_samples: int) -> np.ndarray:
+        """Generate audio samples.
 
         Args:
             num_samples: Number of samples to render
 
         Returns:
-            Stereo audio array, shape (2, num_samples), float32 normalized to [-1, 1]
+            NumPy array, shape (2, num_samples), dtype float32
+
+        Raises:
+            RenderError: If synthesis fails
         """
-        if not self.synth:
-            raise RuntimeError("FluidSynth not initialized")
+        if num_samples <= 0:
+            raise RenderError(f"Invalid sample count: {num_samples}")
 
-        # Get interleaved stereo samples from FluidSynth (returns list of int16)
-        samples = self.synth.get_samples(num_samples)
+        try:
+            # FluidSynth generates stereo float samples
+            # get_samples() returns array of shape (2, num_samples)
+            samples = self.synth.get_samples(num_samples)
 
-        # Convert to numpy array and reshape to stereo
-        audio_int16 = np.array(samples, dtype=np.int16)
-        audio_stereo = audio_int16.reshape(-1, 2).T  # Shape: (2, num_samples)
+            # Convert to NumPy array if not already
+            if not isinstance(samples, np.ndarray):
+                samples = np.array(samples, dtype=np.float32)
 
-        # Normalize to float32 [-1, 1] for compatibility with PyTorch synthesis
-        audio_float = audio_stereo.astype(np.float32) / 32768.0
+            # FluidSynth returns interleaved stereo: [L, R, L, R, L, R, ...]
+            # Need to deinterleave and reshape to (2, num_samples)
+            if len(samples.shape) == 1:
+                # Interleaved format
+                left = samples[0::2]  # Every other sample starting from 0
+                right = samples[1::2]  # Every other sample starting from 1
+                samples = np.stack([left, right], axis=0)
+            elif samples.shape != (2, num_samples):
+                # Try reshaping if wrong shape
+                samples = samples.reshape(2, num_samples)
 
-        return audio_float
+            # DEBUG: Check raw sample range
+            raw_min = np.min(samples)
+            raw_max = np.max(samples)
+            raw_peak = np.max(np.abs(samples))
+            logger.debug(f"Raw FluidSynth samples - min: {raw_min:.4f}, max: {raw_max:.4f}, peak: {raw_peak:.4f}, dtype: {samples.dtype}")
+
+            # FluidSynth with low gain returns int16 values in a SMALL range (e.g., ±1000)
+            # We need to normalize to [-1.0, 1.0] based on actual peak, not assuming ±32768
+            samples = samples.astype(np.float32)
+
+            if raw_peak > 0:
+                # Normalize to 0.8 peak (leave headroom for safety)
+                target_peak = 0.8
+                normalization_factor = target_peak / raw_peak
+                samples = samples * normalization_factor
+                logger.debug(f"Normalized by peak: {raw_peak:.1f} → {target_peak:.1f} (factor: {normalization_factor:.6f})")
+
+            # Clamp to valid range
+            samples = np.clip(samples, -1.0, 1.0)
+
+            return samples
+
+        except Exception as e:
+            raise RenderError(
+                f"Error rendering {num_samples} samples: {e}"
+            ) from e
+
+    def configure_reverb(
+        self, room_size: float = 0.5, damping: float = 0.5, wet_level: float = 0.2
+    ) -> None:
+        """Configure FluidSynth reverb settings.
+
+        Args:
+            room_size: Reverb room size (0.0-1.0)
+            damping: Reverb damping (0.0-1.0)
+            wet_level: Wet signal level (0.0-1.0)
+        """
+        # Clamp values to valid range
+        room_size = max(0.0, min(1.0, room_size))
+        damping = max(0.0, min(1.0, damping))
+        wet_level = max(0.0, min(1.0, wet_level))
+
+        try:
+            # FluidSynth reverb parameters (not all exposed in pyfluidsynth)
+            # We'll use the simplified reverb settings if available
+            self.synth.set_reverb(
+                roomsize=room_size, damping=damping, width=1.0, level=wet_level
+            )
+            logger.info(
+                f"Reverb configured: room={room_size:.2f}, "
+                f"damping={damping:.2f}, wet={wet_level:.2f}"
+            )
+        except AttributeError:
+            # Fallback for older pyfluidsynth versions
+            logger.warning(
+                "Reverb configuration not supported in this pyfluidsynth version"
+            )
+        except Exception as e:
+            logger.warning(f"Error configuring reverb: {e}")
 
     def cleanup(self) -> None:
-        """Release FluidSynth resources."""
-        if self.synth:
+        """Clean up FluidSynth resources."""
+        try:
             self.synth.delete()
-            self.synth = None
-            self.sfid = None
+            logger.info("FluidSynth cleaned up")
+        except Exception as e:
+            logger.error(f"Error cleaning up FluidSynth: {e}")
+
+    def __del__(self) -> None:
+        """Destructor to ensure cleanup."""
+        self.cleanup()

@@ -1,136 +1,187 @@
-"""
-SoundFont Manager for FluidSynth Integration
+"""SoundFont file management and preset mapping.
 
-Handles loading, validation, and management of SoundFont (SF2) files for realistic
-instrument synthesis. Implements three-layer validation (filesystem, size check,
-FluidSynth load test) with fail-fast behavior.
+Manages loading and configuration of SoundFont (.sf2) files for
+piano and pad instruments.
 """
 
-import os
+import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-import fluidsynth
+from typing import Dict, List
+
+from server.config import get_config
+from server.exceptions import ConfigurationError, SoundFontLoadError
+from server.interfaces.synthesis import IFluidSynthRenderer
+
+logger = logging.getLogger(__name__)
 
 
-class SoundFontValidationError(Exception):
-    """Raised when SoundFont validation fails."""
-    pass
+@dataclass
+class SoundFontPreset:
+    """SoundFont preset configuration."""
+
+    instrument_name: str
+    sf2_file_path: Path
+    preset_number: int
+    bank_number: int = 0
+    channel: int = 0
+
+    @property
+    def file_size_mb(self) -> float:
+        """Get SoundFont file size in MB."""
+        if self.sf2_file_path.exists():
+            return self.sf2_file_path.stat().st_size / (1024 * 1024)
+        return 0.0
 
 
 class SoundFontManager:
-    """
-    Manages SoundFont file loading and validation for FluidSynth synthesis.
+    """Manages SoundFont loading and preset configuration."""
 
-    Implements three-layer validation:
-    1. Filesystem check: File exists and is readable
-    2. Size check: File is >100MB (reasonable SF2 size threshold)
-    3. FluidSynth load test: File can be successfully loaded by FluidSynth
+    # Preset mapping for instruments
+    PIANO_CHANNEL = 0
+    PAD_CHANNEL = 1
 
-    Attributes:
-        soundfont_dir: Path to directory containing SF2 files
-        required_soundfonts: List of required SoundFont filenames
-    """
+    PIANO_PRESET = 0  # Grand Piano preset
+    PAD_PRESET = 88  # Warm Pad preset (General MIDI)
 
-    # Minimum file size for valid SoundFont (100MB threshold)
-    MIN_SOUNDFONT_SIZE_BYTES = 100 * 1024 * 1024  # 100MB
-
-    def __init__(self, soundfont_dir: Optional[str] = None):
-        """
-        Initialize SoundFont manager.
+    def __init__(self, renderer: IFluidSynthRenderer):
+        """Initialize SoundFont manager.
 
         Args:
-            soundfont_dir: Optional custom path to soundfonts directory.
-                          Defaults to ./soundfonts/ or AURALIS_SOUNDFONT_DIR env var.
+            renderer: FluidSynth renderer instance
         """
-        if soundfont_dir:
-            self.soundfont_dir = Path(soundfont_dir)
-        else:
-            # Check environment variable, fallback to ./soundfonts/
-            env_dir = os.getenv("AURALIS_SOUNDFONT_DIR")
-            self.soundfont_dir = Path(env_dir) if env_dir else Path("soundfonts")
+        self.renderer = renderer
+        self.config = get_config()
+        self.loaded_presets: Dict[str, SoundFontPreset] = {}
+        self.soundfont_ids: Dict[str, int] = {}
 
-        # Required SoundFont file (FluidR3_GM.sf2 contains all GM presets)
-        self.required_soundfonts = ["FluidR3_GM.sf2"]
+    def load_all_soundfonts(self) -> None:
+        """Load all configured SoundFonts.
 
-    def validate_all_soundfonts(self) -> None:
-        """
-        Validate all required SoundFont files using three-layer validation.
+        Loads Piano and Pad SoundFonts from configuration paths.
 
         Raises:
-            SoundFontValidationError: If any validation layer fails for any required SoundFont
+            SoundFontLoadError: If any SoundFont fails to load
+            ConfigurationError: If SoundFont paths not configured
         """
-        for sf_filename in self.required_soundfonts:
-            sf_path = self.soundfont_dir / sf_filename
-            self._validate_soundfont(sf_path)
+        # Define presets to load
+        presets: List[SoundFontPreset] = [
+            SoundFontPreset(
+                instrument_name="piano",
+                sf2_file_path=self.config.soundfont_piano,
+                preset_number=self.PIANO_PRESET,
+                bank_number=0,
+                channel=self.PIANO_CHANNEL,
+            ),
+            SoundFontPreset(
+                instrument_name="pad",
+                sf2_file_path=self.config.soundfont_gm,
+                preset_number=self.PAD_PRESET,
+                bank_number=0,
+                channel=self.PAD_CHANNEL,
+            ),
+        ]
 
-    def _validate_soundfont(self, sf_path: Path) -> None:
-        """
-        Three-layer validation for a single SoundFont file.
+        total_size_mb = 0.0
 
-        Args:
-            sf_path: Path to SoundFont file
+        for preset in presets:
+            # Validate file exists
+            if not preset.sf2_file_path.exists():
+                error_msg = (
+                    f"SoundFont not found: {preset.sf2_file_path}\n"
+                    f"Please download SoundFonts as described in soundfonts/.env.example"
+                )
+                raise SoundFontLoadError(error_msg)
 
-        Raises:
-            SoundFontValidationError: If any validation layer fails
-        """
-        # Layer 1: Filesystem check
-        if not sf_path.exists():
-            raise SoundFontValidationError(
-                f"SoundFont file not found: {sf_path}\n"
-                f"Expected location: {sf_path.absolute()}\n"
-                f"Please download FluidR3_GM.sf2 and place it in the soundfonts/ directory.\n"
-                f"Download: https://github.com/urish/cinto/raw/master/media/FluidR3%20GM.sf2"
-            )
+            # Load SoundFont
+            try:
+                sf_id = self.renderer.load_soundfont(str(preset.sf2_file_path))
+                self.soundfont_ids[preset.instrument_name] = sf_id
 
-        if not sf_path.is_file():
-            raise SoundFontValidationError(
-                f"SoundFont path is not a file: {sf_path}"
-            )
-
-        if not os.access(sf_path, os.R_OK):
-            raise SoundFontValidationError(
-                f"SoundFont file is not readable: {sf_path}\n"
-                f"Check file permissions."
-            )
-
-        # Layer 2: Size check (>100MB threshold)
-        file_size = sf_path.stat().st_size
-        if file_size < self.MIN_SOUNDFONT_SIZE_BYTES:
-            raise SoundFontValidationError(
-                f"SoundFont file too small: {sf_path}\n"
-                f"Size: {file_size / (1024*1024):.1f}MB (expected >100MB)\n"
-                f"File may be corrupted or incomplete."
-            )
-
-        # Layer 3: FluidSynth load test
-        try:
-            # Create temporary FluidSynth instance to test loading
-            test_synth = fluidsynth.Synth(samplerate=44100.0)
-            sfid = test_synth.sfload(str(sf_path.absolute()))
-
-            if sfid == -1:
-                raise SoundFontValidationError(
-                    f"FluidSynth failed to load SoundFont: {sf_path}\n"
-                    f"File may be corrupted or not a valid SF2 file."
+                # Select preset on channel
+                self.renderer.select_preset(
+                    channel=preset.channel,
+                    sf_id=sf_id,
+                    bank=preset.bank_number,
+                    preset=preset.preset_number,
                 )
 
-            # Cleanup test instance
-            test_synth.delete()
+                # Track loaded preset
+                self.loaded_presets[preset.instrument_name] = preset
+                total_size_mb += preset.file_size_mb
 
-        except Exception as e:
-            raise SoundFontValidationError(
-                f"FluidSynth load test failed for: {sf_path}\n"
-                f"Error: {str(e)}"
+                logger.info(
+                    f"Loaded {preset.instrument_name}: "
+                    f"{preset.sf2_file_path.name} "
+                    f"(channel={preset.channel}, "
+                    f"preset={preset.preset_number}, "
+                    f"{preset.file_size_mb:.1f}MB)"
+                )
+
+            except Exception as e:
+                raise SoundFontLoadError(
+                    f"Failed to load {preset.instrument_name} SoundFont: {e}"
+                ) from e
+
+        logger.info(
+            f"All SoundFonts loaded successfully "
+            f"({len(self.loaded_presets)} instruments, {total_size_mb:.1f}MB total)"
+        )
+
+        # Configure minimal reverb
+        self.configure_reverb()
+
+    def configure_reverb(self) -> None:
+        """Configure reverb settings for ambient music."""
+        try:
+            self.renderer.configure_reverb(
+                room_size=self.config.reverb_room_size,
+                damping=self.config.reverb_damping,
+                wet_level=self.config.reverb_wet_level,
             )
+            logger.info("Reverb configured for ambient music")
+        except Exception as e:
+            logger.warning(f"Could not configure reverb: {e}")
 
-    def get_soundfont_path(self, filename: str) -> Path:
-        """
-        Get full path to a SoundFont file.
-
-        Args:
-            filename: SoundFont filename (e.g., "FluidR3_GM.sf2")
+    def get_piano_channel(self) -> int:
+        """Get MIDI channel for piano instrument.
 
         Returns:
-            Full path to SoundFont file
+            MIDI channel number (0)
         """
-        return self.soundfont_dir / filename
+        return self.PIANO_CHANNEL
+
+    def get_pad_channel(self) -> int:
+        """Get MIDI channel for pad instrument.
+
+        Returns:
+            MIDI channel number (1)
+        """
+        return self.PAD_CHANNEL
+
+    def get_loaded_instruments(self) -> List[str]:
+        """Get list of loaded instrument names.
+
+        Returns:
+            List of instrument names (e.g., ["piano", "pad"])
+        """
+        return list(self.loaded_presets.keys())
+
+    def get_total_memory_mb(self) -> float:
+        """Get total SoundFont memory usage.
+
+        Returns:
+            Total size in megabytes
+        """
+        return sum(preset.file_size_mb for preset in self.loaded_presets.values())
+
+    def is_loaded(self, instrument_name: str) -> bool:
+        """Check if instrument is loaded.
+
+        Args:
+            instrument_name: Instrument name ("piano" or "pad")
+
+        Returns:
+            True if loaded, False otherwise
+        """
+        return instrument_name in self.loaded_presets

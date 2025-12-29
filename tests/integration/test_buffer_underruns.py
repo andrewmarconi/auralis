@@ -1,137 +1,170 @@
-"""Integration test for buffer underrun prevention."""
+"""Integration test for buffer underrun detection and recovery.
+
+Validates that buffer health remains >98% during normal streaming and
+that underruns are properly detected and recovered.
+"""
 
 import asyncio
-import json
-import random
-
 import pytest
-import websockets
+import time
 
-SERVER_URI = "ws://localhost:8000/ws/audio/test_client"
-CHUNK_COUNT = 50
-
-
-async def test_buffer_underrun_prevention():
-    """Test that adaptive buffer prevents underruns under simulated network jitter."""
-
-    chunks_received = 0
-    underruns = 0
-    last_buffer_depth = 0
-
-    try:
-        async with websockets.connect(SERVER_URI) as websocket:
-            # Send initial control message
-            await websocket.send(
-                json.dumps(
-                    {
-                        "type": "control",
-                        "action": "start",
-                        "params": {"key": "C", "bpm": 70, "intensity": 0.5},
-                    }
-                )
-            )
-
-            # Receive chunks with simulated jitter
-            for i in range(CHUNK_COUNT):
-                # Simulate network delay (20% of chunks delayed)
-                if random.random() < 0.2:
-                    delay_ms = random.uniform(50, 150)
-                    await asyncio.sleep(delay_ms / 1000)
-
-                message = await websocket.recv()
-                data = json.loads(message)
-
-                if data["type"] == "audio":
-                    chunks_received += 1
-
-                    # Track buffer depth
-                    current_buffer_depth = data.get("buffer_depth", 0)
-
-                    # Detect underruns (buffer depth = 0)
-                    if current_buffer_depth == 0 and last_buffer_depth > 0:
-                        underruns += 1
-
-                    last_buffer_depth = current_buffer
-
-                    # Log progress every 10 chunks
-                    if chunks_received % 10 == 0:
-                        print(
-                            f"Progress: {chunks_received}/{CHUNK_COUNT}, "
-                            f"Underruns: {underruns}, "
-                            f"Buffer depth: {current_buffer}"
-                        )
-
-    except Exception as e:
-        pytest.fail(f"Test failed: {e}")
-
-    # Calculate underrun rate
-    if chunks_received > 0:
-        underrun_rate = underruns / chunks_received
-        print(f"\n=== Underrun Prevention Test Results ===")
-        print(f"Chunks received: {chunks_received}")
-        print(f"Underrun events: {underruns}")
-        print(f"Underrun rate: {underrun_rate * 100:.2f}%")
-
-        # Validate
-        # Target: <1% underrun rate
-        assert underrun_rate < 0.01, f"Underrun rate {underrun_rate * 100:.2f}% exceeds 1% target"
-
-        print("✅ Buffer underrun prevention test passed!")
+from server.ring_buffer import RingBuffer
+from server.audio_chunk import AudioChunk
+from server.buffer_management import BufferManager
+from server.metrics import PerformanceMetrics
+import numpy as np
 
 
-async def test_buffer_recovery_after_underrun():
-    """Test that buffer recovers after underrun."""
+class TestBufferUnderruns:
+    """Test buffer underrun scenarios."""
 
-    chunks_received = 0
-    recovered_count = 0
+    @pytest.mark.asyncio
+    async def test_normal_streaming_no_underruns(self):
+        """Verify buffer maintains health during normal streaming (5 minutes)."""
+        buffer = RingBuffer(capacity=20)
+        buffer_manager = BufferManager()
+        metrics = PerformanceMetrics()
 
-    try:
-        async with websockets.connect(SERVER_URI) as websocket:
-            await websocket.send(
-                json.dumps(
-                    {
-                        "type": "control",
-                        "action": "start",
-                        "params": {"key": "C", "bpm": 70, "intensity": 0.5},
-                    }
-                )
-            )
+        underrun_count = 0
+        chunk_count = 0
+        chunk_interval_sec = 0.1  # 100ms
 
-            # First, cause underruns by dropping chunks (simulate slow client)
-            for _ in range(10):
-                await websocket.recv()  # Drop chunks
-                await asyncio.sleep(0.2)
+        # Simulate 30 seconds of streaming (reduced from 5 minutes for test speed)
+        duration_sec = 30.0
+        num_chunks = int(duration_sec / chunk_interval_sec)
 
-            # Then receive normally
-            for i in range(CHUNK_COUNT):
-                message = await websocket.recv()
-                data = json.loads(message)
+        async def producer():
+            """Produce chunks at regular intervals."""
+            for i in range(num_chunks):
+                pcm_data = np.zeros((2, 4410), dtype=np.int16)
+                chunk = AudioChunk(data=pcm_data, seq=i, timestamp=time.time())
 
-                if data["type"] == "audio":
-                    chunks_received += 1
+                buffer.write(chunk)
+                await asyncio.sleep(chunk_interval_sec)
 
-                    buffer_depth = data.get("buffer_depth", 0)
+        async def consumer():
+            """Consume chunks and track underruns."""
+            nonlocal underrun_count, chunk_count
 
-                    # Count recovery events (buffer_depth goes from 0 to >2)
-                    if buffer_depth > 0 and recovered_count < 5:
-                        recovered_count += 1
-                        print(f"Recovery #{recovered_count}: buffer_depth = {buffer_depth}")
+            for _ in range(num_chunks):
+                # Try to read chunk
+                chunk = buffer.read()
 
-                    if chunks_received == CHUNK_COUNT:
-                        break
+                if chunk is None:
+                    underrun_count += 1
+                    metrics.increment_buffer_underrun()
+                else:
+                    chunk_count += 1
 
-    except Exception as e:
-        pytest.fail(f"Test failed: {e}")
+                await asyncio.sleep(chunk_interval_sec)
 
-    # Validate recovery
-    assert recovered_count >= 3, f"Expected at least 3 recoveries, got {recovered_count}"
+        # Run producer and consumer concurrently
+        await asyncio.gather(producer(), consumer())
 
-    print(f"✅ Buffer recovery test passed ({recovered_count} recoveries)")
+        # Calculate buffer health
+        buffer_health_pct = (chunk_count / num_chunks) * 100.0
 
+        # Verify >98% buffer health
+        assert buffer_health_pct >= 98.0, (
+            f"Buffer health {buffer_health_pct:.1f}% below 98% target "
+            f"({underrun_count} underruns in {num_chunks} chunks)"
+        )
 
-if __name__ == "__main__":
-    print("=== Running buffer underrun prevention tests ===\n")
+    @pytest.mark.asyncio
+    async def test_underrun_detection(self):
+        """Verify buffer underruns are properly detected and counted."""
+        buffer = RingBuffer(capacity=5)
+        metrics = PerformanceMetrics()
 
-    asyncio.run(test_buffer_underrun_prevention())
-    print()
-    asyncio.run(test_buffer_recovery_after_underrun())
+        # Read from empty buffer
+        chunk = buffer.read()
+        assert chunk is None, "Expected None from empty buffer"
+
+        # Increment underrun counter
+        metrics.increment_buffer_underrun()
+
+        # Verify metrics
+        snapshot = metrics.get_snapshot()
+        assert snapshot["buffer_underruns"] == 1, "Expected 1 underrun recorded"
+
+    @pytest.mark.asyncio
+    async def test_back_pressure_prevents_overflow(self):
+        """Verify back-pressure logic prevents buffer overflow."""
+        buffer = RingBuffer(capacity=10)
+        buffer_manager = BufferManager()
+        metrics = PerformanceMetrics()
+
+        overflow_count = 0
+
+        # Fill buffer to near capacity
+        for i in range(8):
+            pcm_data = np.zeros((2, 4410), dtype=np.int16)
+            chunk = AudioChunk(data=pcm_data, seq=i, timestamp=time.time())
+            buffer.write(chunk)
+
+        # Try to write more with back-pressure
+        for i in range(8, 15):
+            depth = buffer.get_depth()
+            capacity = buffer.capacity
+
+            # Apply back-pressure
+            await buffer_manager.apply_back_pressure(depth, capacity)
+
+            # Attempt write
+            pcm_data = np.zeros((2, 4410), dtype=np.int16)
+            chunk = AudioChunk(data=pcm_data, seq=i, timestamp=time.time())
+
+            success = buffer.write(chunk)
+            if not success:
+                overflow_count += 1
+                metrics.increment_buffer_overflow()
+
+        # Verify no catastrophic overflow
+        # Some overflow is expected when capacity is reached
+        assert overflow_count < 5, f"Excessive overflow: {overflow_count} chunks dropped"
+
+    @pytest.mark.asyncio
+    async def test_buffer_recovery_after_underrun(self):
+        """Verify buffer recovers gracefully after underrun."""
+        buffer = RingBuffer(capacity=10)
+
+        # Create underrun condition (empty buffer)
+        chunk = buffer.read()
+        assert chunk is None
+
+        # Fill buffer
+        for i in range(5):
+            pcm_data = np.zeros((2, 4410), dtype=np.int16)
+            chunk = AudioChunk(data=pcm_data, seq=i, timestamp=time.time())
+            buffer.write(chunk)
+
+        # Verify recovery
+        assert buffer.get_depth() == 5
+        assert not buffer.is_empty()
+
+        # Verify can read chunks
+        for _ in range(5):
+            chunk = buffer.read()
+            assert chunk is not None
+
+    @pytest.mark.asyncio
+    async def test_buffer_health_status(self):
+        """Verify buffer health status is correctly reported."""
+        buffer = RingBuffer(capacity=20)
+        buffer_manager = BufferManager()
+
+        # Emergency (<1 chunk)
+        health = buffer_manager.get_buffer_health(0, 20)
+        assert health == "emergency"
+
+        # Low (1-2 chunks)
+        health = buffer_manager.get_buffer_health(2, 20)
+        assert health == "low"
+
+        # Healthy (3-4 chunks)
+        health = buffer_manager.get_buffer_health(3, 20)
+        assert health == "healthy"
+
+        # Full (5+ chunks)
+        health = buffer_manager.get_buffer_health(5, 20)
+        assert health == "full"

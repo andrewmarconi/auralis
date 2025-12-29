@@ -1,1 +1,1 @@
-"""Integration tests for Auralis components."""
+"""Integration tests for end-to-end workflows."""

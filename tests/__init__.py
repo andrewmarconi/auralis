@@ -1,5 +1,3 @@
-"""
-Auralis Test Suite
+"""Auralis Test Suite - Integration, performance, and unit tests."""
 
-Integration and performance tests for real-time audio streaming.
-"""
+__version__ = "2.0.0"

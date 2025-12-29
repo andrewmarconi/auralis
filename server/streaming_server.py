@@ -1,450 +1,295 @@
-"""
-WebSocket Streaming Server
+"""WebSocket streaming server for real-time audio delivery.
 
-Handles real-time audio streaming over WebSocket connections with
-base64-encoded PCM chunks.
+Manages client connections and streams audio chunks from the ring buffer
+to connected clients.
 """
 
 import asyncio
-import base64
-import json
+import logging
 import time
-from typing import Optional, Union
+from typing import Dict, Optional
 
-import numpy as np
 from fastapi import WebSocket, WebSocketDisconnect
-from loguru import logger
-from numpy.typing import NDArray
 
-from server.ring_buffer import RingBuffer, AdaptiveRingBuffer
+from server.audio_chunk import AudioChunk
+from server.interfaces.buffer import IRingBuffer
 
-
-# Forward reference for ApplicationState type hint
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from server.main import ApplicationState
-    from server.metrics import PrometheusMetrics
+logger = logging.getLogger(__name__)
 
 
-class AudioBufferPool:
-    """
-    Object pool for audio conversion buffers (T091).
+class ClientConnection:
+    """Represents a connected WebSocket client."""
 
-    Reduces GC pressure by reusing pre-allocated numpy arrays for
-    float32->int16 conversion and stereo interleaving operations.
-    """
-
-    def __init__(self, pool_size: int = 10, chunk_samples: int = 4410):
-        """
-        Initialize buffer pool.
+    def __init__(self, client_id: str, websocket: WebSocket):
+        """Initialize client connection.
 
         Args:
-            pool_size: Number of pre-allocated buffer pairs
-            chunk_samples: Samples per channel (100ms @ 44.1kHz = 4410)
+            client_id: Unique client identifier
+            websocket: WebSocket connection instance
         """
-        self.chunk_samples = chunk_samples
-        # Pre-allocate buffer pairs: (int16_buffer, interleaved_buffer)
-        self.available_buffers: list[tuple[NDArray[np.int16], NDArray[np.int16]]] = []
+        self.client_id = client_id
+        self.websocket = websocket
+        self.connected_at = time.time()
+        self.last_chunk_seq = 0
+        self.chunks_sent = 0
 
-        for _ in range(pool_size):
-            int16_buf = np.empty((2, chunk_samples), dtype=np.int16)
-            interleaved_buf = np.empty(chunk_samples * 2, dtype=np.int16)
-            self.available_buffers.append((int16_buf, interleaved_buf))
-
-    def acquire(self) -> tuple[NDArray[np.int16], NDArray[np.int16]] | None:
-        """Get a buffer pair from pool, or None if empty."""
-        if self.available_buffers:
-            return self.available_buffers.pop()
-        return None
-
-    def release(self, buffers: tuple[NDArray[np.int16], NDArray[np.int16]]) -> None:
-        """Return buffer pair to pool."""
-        self.available_buffers.append(buffers)
-
-
-# Global buffer pool (shared across all streaming instances)
-_buffer_pool = AudioBufferPool(pool_size=10)
-
-
-class AudioChunk:
-    """
-    100ms segment of audio data for WebSocket transmission.
-
-    Attributes:
-        data: Base64-encoded 16-bit PCM audio
-        timestamp: Unix timestamp for synchronization
-        sequence: Sequential packet number
-        sample_rate: Audio sampling rate (44100)
-        format: Audio format identifier ("pcm16")
-    """
-
-    def __init__(
-        self,
-        audio_data: NDArray[np.float32],
-        sequence: int,
-        sample_rate: int = 44100,
-    ) -> None:
-        """
-        Create audio chunk from float32 audio data with object pooling (T091).
+    async def send_chunk(self, chunk: AudioChunk) -> bool:
+        """Send audio chunk to client.
 
         Args:
-            audio_data: Stereo audio array, shape (2, num_samples), float32 [-1, 1]
-            sequence: Sequential packet number
-            sample_rate: Audio sampling rate
+            chunk: Audio chunk to send
+
+        Returns:
+            True if sent successfully, False on error
         """
-        # Try to acquire buffers from pool (T091)
-        pooled_buffers = _buffer_pool.acquire()
+        try:
+            await self.websocket.send_json(chunk.to_json())
+            self.last_chunk_seq = chunk.seq
+            self.chunks_sent += 1
+            return True
+        except Exception as e:
+            logger.error(
+                f"Error sending chunk to client {self.client_id}: {e}",
+                extra={"client_id": self.client_id, "chunk_seq": chunk.seq},
+            )
+            return False
 
-        if pooled_buffers is not None:
-            # Use pooled buffers
-            int16_buf, interleaved_buf = pooled_buffers
+    async def send_control_message(self, message: dict) -> bool:
+        """Send control message to client.
 
-            # Convert float32 [-1, 1] to int16 [-32768, 32767] in-place
-            np.multiply(audio_data, 32767, out=int16_buf, casting='unsafe')
+        Args:
+            message: Control message dictionary
 
-            # Interleave stereo channels: [L, R, L, R, ...] in-place
-            interleaved_buf[0::2] = int16_buf[0, :]  # Left channel
-            interleaved_buf[1::2] = int16_buf[1, :]  # Right channel
+        Returns:
+            True if sent successfully, False on error
+        """
+        try:
+            await self.websocket.send_json(message)
+            return True
+        except Exception as e:
+            logger.error(
+                f"Error sending control message to client {self.client_id}: {e}"
+            )
+            return False
 
-            # Convert to bytes and base64 encode
-            pcm_bytes = interleaved_buf.tobytes()
-            self.data = base64.b64encode(pcm_bytes).decode("utf-8")
+    def get_connection_duration(self) -> float:
+        """Get connection duration in seconds.
 
-            # Return buffers to pool immediately (encoding is done)
-            _buffer_pool.release(pooled_buffers)
-        else:
-            # Pool exhausted - fall back to dynamic allocation
-            audio_int16 = (audio_data * 32767).astype(np.int16)
-            interleaved = np.empty(audio_int16.size, dtype=np.int16)
-            interleaved[0::2] = audio_int16[0, :]
-            interleaved[1::2] = audio_int16[1, :]
-            pcm_bytes = interleaved.tobytes()
-            self.data = base64.b64encode(pcm_bytes).decode("utf-8")
-
-        self.timestamp = int(time.time() * 1000)  # Milliseconds
-        self.sequence = sequence
-        self.sample_rate = sample_rate
-        self.format = "pcm16"
-
-    def to_json(self) -> str:
-        """Serialize chunk to JSON for WebSocket transmission."""
-        return json.dumps(
-            {
-                "type": "audio",
-                "data": self.data,
-                "timestamp": self.timestamp,
-                "sequence": self.sequence,
-                "sample_rate": self.sample_rate,
-                "format": self.format,
-            }
-        )
+        Returns:
+            Duration in seconds
+        """
+        return time.time() - self.connected_at
 
 
 class StreamingServer:
-    """
-    WebSocket streaming server for real-time audio delivery.
+    """WebSocket streaming server for audio delivery."""
 
-    Manages client connections and streams audio chunks from ring buffer.
-    """
-
-    def __init__(
-        self,
-        ring_buffer: Union[RingBuffer, AdaptiveRingBuffer],
-        app_state: Optional["ApplicationState"] = None,
-        metrics: Optional["PrometheusMetrics"] = None
-    ) -> None:
-        """
-        Initialize streaming server (T032, T034).
+    def __init__(self, ring_buffer: IRingBuffer, synthesis_engine=None):
+        """Initialize streaming server.
 
         Args:
-            ring_buffer: Shared ring buffer for audio data (RingBuffer or AdaptiveRingBuffer)
-            app_state: Application state for parameter updates (optional)
-            metrics: Prometheus metrics collector for jitter tracking (optional)
+            ring_buffer: Ring buffer for audio chunks
+            synthesis_engine: Optional synthesis engine (will be started/stopped with client connections)
         """
         self.ring_buffer = ring_buffer
-        self.app_state = app_state
-        self.metrics = metrics
-        self.active_connections: set[WebSocket] = set()
-        self.sequence_counter = 0
-        self.is_adaptive = isinstance(ring_buffer, AdaptiveRingBuffer)
+        self.clients: Dict[str, ClientConnection] = {}
+        self.next_client_id = 0
+        self.synthesis_engine = synthesis_engine
 
-        # Client-specific jitter tracking (T034)
-        # Maps client_id -> last chunk send time (ms)
-        self._client_last_chunk_time: dict[str, float] = {}
+        logger.info("Streaming server initialized")
 
-    async def handle_client(self, websocket: WebSocket) -> None:
+    def _generate_client_id(self) -> str:
+        """Generate unique client ID.
+
+        Returns:
+            Client ID string
         """
-        Handle individual WebSocket client connection.
+        client_id = f"client_{self.next_client_id}"
+        self.next_client_id += 1
+        return client_id
+
+    async def handle_connection(self, websocket: WebSocket) -> None:
+        """Handle WebSocket connection lifecycle.
 
         Args:
-            websocket: FastAPI WebSocket connection
+            websocket: WebSocket connection instance
         """
+        # Accept connection
         await websocket.accept()
-        self.active_connections.add(websocket)
 
-        logger.info(f"Client connected. Total active: {len(self.active_connections)}")
+        # Generate client ID
+        client_id = self._generate_client_id()
+        client = ClientConnection(client_id, websocket)
+        self.clients[client_id] = client
 
-        # Client ID for tracking
-        client_id = f"client_{id(websocket)}"
+        logger.info(
+            f"Client connected: {client_id} (total clients: {len(self.clients)})"
+        )
+
+        # Start synthesis engine if this is the first client
+        if len(self.clients) == 1 and self.synthesis_engine:
+            if not self.synthesis_engine.is_running():
+                await self.synthesis_engine.start_generation_loop()
+                logger.info("Synthesis engine started (first client connected)")
 
         try:
-            # Send initial connection confirmation
-            await websocket.send_json(
+            # Send welcome message
+            await client.send_control_message(
                 {
-                    "type": "connected",
-                    "message": "Audio streaming ready",
-                    "sample_rate": self.ring_buffer.sample_rate,
-                    "chunk_size_ms": 100,
+                    "type": "welcome",
+                    "client_id": client_id,
+                    "message": "Connected to Auralis streaming server",
                 }
             )
 
-            # Stream audio chunks
-            await self._stream_audio(websocket)
+            # Start streaming task and control message handler
+            streaming_task = asyncio.create_task(self._stream_to_client(client))
+            control_task = asyncio.create_task(self._handle_control_messages(client))
+
+            # Wait for either task to complete
+            done, pending = await asyncio.wait(
+                [streaming_task, control_task], return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # Cancel remaining task
+            for task in pending:
+                task.cancel()
 
         except WebSocketDisconnect:
-            logger.info("Client disconnected gracefully")
+            logger.info(
+                f"Client {client_id} disconnected normally",
+                extra={"client_id": client_id},
+            )
         except Exception as e:
-            logger.error(f"Error in client handler: {e}")
+            logger.error(
+                f"Error handling client {client_id}: {e}", extra={"client_id": client_id}
+            )
         finally:
-            self.active_connections.discard(websocket)
+            # Remove client
+            if client_id in self.clients:
+                del self.clients[client_id]
 
-            # Clean up jitter tracking state (T034)
-            if client_id in self._client_last_chunk_time:
-                del self._client_last_chunk_time[client_id]
+            logger.info(
+                f"Client {client_id} removed "
+                f"(duration: {client.get_connection_duration():.1f}s, "
+                f"chunks sent: {client.chunks_sent}, "
+                f"remaining clients: {len(self.clients)})"
+            )
 
-            logger.info(f"Client removed. Total active: {len(self.active_connections)}")
+            # Stop synthesis engine if this was the last client
+            if len(self.clients) == 0 and self.synthesis_engine:
+                if self.synthesis_engine.is_running():
+                    await self.synthesis_engine.stop_generation_loop()
+                    logger.info("Synthesis engine stopped (last client disconnected)")
 
-    async def _stream_audio(self, websocket: WebSocket) -> None:
-        """
-        Stream audio chunks to client in real-time (T032, T034).
+    async def _stream_to_client(self, client: ClientConnection) -> None:
+        """Stream audio chunks to client from ring buffer.
 
         Args:
-            websocket: Client WebSocket connection
+            client: Client connection
         """
-        # Generate client ID for metrics tracking
-        client_id = f"client_{id(websocket)}"
-
-        # Chunk timing control to prevent bursts
-        chunk_interval_sec = 0.1  # 100ms per chunk
-        next_send_time = time.time()
-
         while True:
-            # Read 100ms chunk from ring buffer
-            if self.is_adaptive:
-                # Use AdaptiveRingBuffer's read_chunk method (non-blocking)
-                audio_data = await asyncio.to_thread(
-                    self.ring_buffer.read_chunk  # type: ignore
-                )
-            else:
-                # Use standard RingBuffer's read_blocking method
-                audio_data = await asyncio.to_thread(
-                    self.ring_buffer.read_blocking,
-                    num_samples=self.ring_buffer.chunk_size,
-                    timeout=0.5,  # 500ms timeout
-                )
+            # Read chunk from buffer
+            chunk = self.ring_buffer.read()
 
-            if audio_data is None:
-                # Buffer underflow - send silence
-                logger.warning("Ring buffer underflow - sending silence")
+            if chunk is None:
+                # Buffer empty, wait a bit
+                await asyncio.sleep(0.01)  # 10ms
+                continue
 
-                # Get chunk size (adaptive buffer uses samples_per_chunk)
-                if self.is_adaptive:
-                    chunk_size = self.ring_buffer.samples_per_chunk  # type: ignore
-                else:
-                    chunk_size = self.ring_buffer.chunk_size
+            # Send chunk to client
+            success = await client.send_chunk(chunk)
+            if not success:
+                logger.warning(f"Failed to send chunk to {client.client_id}, closing")
+                break
 
-                audio_data = np.zeros((2, chunk_size), dtype=np.float32)
+            # Small delay to prevent overwhelming the client
+            await asyncio.sleep(0.001)  # 1ms between chunks
 
-                # Notify client of underflow with buffer health (T033)
-                warning_data = {
-                    "type": "warning",
-                    "message": "Buffer underflow - temporary silence",
-                }
-
-                if self.is_adaptive:
-                    # Add buffer health metrics for adaptive buffer
-                    health = self.ring_buffer.get_buffer_health()  # type: ignore
-                    warning_data["buffer_health"] = health
-
-                await websocket.send_json(warning_data)
-
-            # Create and send audio chunk
-            chunk = AudioChunk(audio_data, self.sequence_counter)
-            self.sequence_counter += 1
-
-            # Track chunk delivery timing for jitter metrics (T034)
-            now_ms = time.time() * 1000  # Current time in milliseconds
-
-            if self.metrics:
-                # Calculate jitter if we have a previous send time
-                if client_id in self._client_last_chunk_time:
-                    expected_interval_ms = 100.0  # Expected 100ms chunk interval
-                    actual_interval_ms = now_ms - self._client_last_chunk_time[client_id]
-                    jitter_ms = abs(actual_interval_ms - expected_interval_ms)
-
-                    # Record jitter to Prometheus metrics
-                    self.metrics.record_chunk_jitter(client_id, jitter_ms)
-
-                # Update last chunk time
-                self._client_last_chunk_time[client_id] = now_ms
-
-                # Report buffer depth per client (T035)
-                if self.is_adaptive:
-                    # Use AdaptiveRingBuffer's buffer depth
-                    health = self.ring_buffer.get_buffer_health()  # type: ignore
-                    depth_ms = health.get("depth_ms", 0)
-                else:
-                    # Use standard RingBuffer's buffer depth
-                    depth_ms = self.ring_buffer.get_buffer_depth_ms()
-
-                self.metrics.set_buffer_depth(client_id, depth_ms)
-
-            await websocket.send_text(chunk.to_json())
-
-            # Maintain steady chunk timing to prevent bursts (reduce jitter)
-            now = time.time()
-            next_send_time += chunk_interval_sec
-
-            # Calculate sleep time to maintain steady 100ms interval
-            sleep_time = next_send_time - now
-            if sleep_time > 0:
-                # Sleep until next chunk should be sent
-                await asyncio.sleep(sleep_time)
-            else:
-                # We're running behind - reset timing and log warning
-                if sleep_time < -0.05:  # More than 50ms behind
-                    logger.warning(f"Chunk delivery running {-sleep_time*1000:.1f}ms behind schedule")
-                next_send_time = now
-
-            # Check for client control messages (non-blocking)
-            try:
-                message = await asyncio.wait_for(
-                    websocket.receive_text(),
-                    timeout=0.001,  # 1ms timeout
-                )
-                await self._handle_control_message(websocket, message)
-            except asyncio.TimeoutError:
-                pass  # No control message - continue streaming
-
-    async def _handle_control_message(self, websocket: WebSocket, message: str) -> None:
-        """
-        Handle control messages from client.
+    async def _handle_control_messages(self, client: ClientConnection) -> None:
+        """Handle control messages from client.
 
         Args:
-            websocket: Client WebSocket connection
-            message: JSON control message
+            client: Client connection
         """
-        try:
-            data = json.loads(message)
-            msg_type = data.get("type")
+        while True:
+            try:
+                # Receive message from client
+                message = await client.websocket.receive_json()
 
-            if msg_type == "ping":
-                # Respond to ping
-                await websocket.send_json({"type": "pong"})
+                # Handle different message types
+                msg_type = message.get("type")
 
-            elif msg_type == "buffer_status":
-                # Report buffer depth and health metrics (T033)
-                response = {"type": "buffer_status"}
+                if msg_type == "ping":
+                    # Respond to ping with pong
+                    await client.send_control_message(
+                        {"type": "pong", "timestamp": time.time()}
+                    )
 
-                if self.is_adaptive:
-                    # Use AdaptiveRingBuffer's comprehensive health metrics
-                    health = self.ring_buffer.get_buffer_health()  # type: ignore
-                    response.update(health)
-                else:
-                    # Basic buffer depth for standard RingBuffer
-                    depth_ms = self.ring_buffer.get_buffer_depth_ms()
-                    response["depth_ms"] = depth_ms
+                elif msg_type == "control":
+                    # Handle parameter changes (key, mode, BPM, intensity)
+                    logger.info(
+                        f"Control message from {client.client_id}: {message}",
+                        extra={"client_id": client.client_id},
+                    )
 
-                await websocket.send_json(response)
-
-            elif msg_type == "control":
-                # Handle parameter updates from client
-                try:
-                    if self.app_state is not None:
-                        # Update parameters directly from WebSocket control message
-                        updated_fields = []
-
-                        # Update boolean voice enable/disable controls
-                        if "enable_pads" in data:
-                            self.app_state.parameters.enable_pads = bool(data["enable_pads"])
-                            updated_fields.append("enable_pads")
-                        if "enable_melody" in data:
-                            self.app_state.parameters.enable_melody = bool(data["enable_melody"])
-                            updated_fields.append("enable_melody")
-                        if "enable_kicks" in data:
-                            self.app_state.parameters.enable_kicks = bool(data["enable_kicks"])
-                            updated_fields.append("enable_kicks")
-                        if "enable_swells" in data:
-                            self.app_state.parameters.enable_swells = bool(data["enable_swells"])
-                            updated_fields.append("enable_swells")
-
-                        # Update numeric parameters
-                        if "key" in data:
-                            self.app_state.parameters.key = str(data["key"])
-                            updated_fields.append("key")
-                        if "bpm" in data:
-                            self.app_state.parameters.bpm = int(data["bpm"])
-                            updated_fields.append("bpm")
-                        if "intensity" in data:
-                            self.app_state.parameters.intensity = float(data["intensity"])
-                            updated_fields.append("intensity")
-                        if "melody_complexity" in data:
-                            self.app_state.parameters.melody_complexity = float(data["melody_complexity"])
-                            updated_fields.append("melody_complexity")
-                        if "chord_progression_variety" in data:
-                            self.app_state.parameters.chord_progression_variety = float(data["chord_progression_variety"])
-                            updated_fields.append("chord_progression_variety")
-                        if "harmonic_density" in data:
-                            self.app_state.parameters.harmonic_density = float(data["harmonic_density"])
-                            updated_fields.append("harmonic_density")
-
-                        if updated_fields:
-                            logger.info(f"Parameters updated via WebSocket: {updated_fields}")
-
-                        await websocket.send_json({
-                            "type": "control_ack",
-                            "message": f"Parameters updated: {', '.join(updated_fields)}" if updated_fields else "No parameters updated",
-                            "updated_fields": updated_fields
-                        })
-                    else:
-                        # Fallback if app_state not available
-                        await websocket.send_json(
-                            {"type": "control_ack", "message": "Parameters should be updated via REST API"}
+                    # Forward to synthesis engine
+                    if self.synthesis_engine:
+                        self.synthesis_engine.update_parameters(
+                            key=message.get("key"),
+                            mode=message.get("mode"),
+                            bpm=message.get("bpm"),
+                            intensity=message.get("intensity")
                         )
-                except Exception as e:
-                    logger.error(f"Error updating parameters via WebSocket: {e}")
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": f"Failed to update parameters: {str(e)}"
-                    })
 
-            else:
-                logger.warning(f"Unknown control message type: {msg_type}")
+                elif msg_type == "parameter_change":
+                    # Legacy message type support
+                    logger.info(
+                        f"Parameter change from {client.client_id}: {message}",
+                        extra={"client_id": client.client_id},
+                    )
 
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON in control message: {message}")
+                    # Forward to synthesis engine
+                    if self.synthesis_engine:
+                        self.synthesis_engine.update_parameters(
+                            key=message.get("key"),
+                            mode=message.get("mode"),
+                            bpm=message.get("bpm"),
+                            intensity=message.get("intensity")
+                        )
 
-    def get_active_client_count(self) -> int:
-        """Get number of active WebSocket connections."""
-        return len(self.active_connections)
+                else:
+                    logger.warning(
+                        f"Unknown message type from {client.client_id}: {msg_type}"
+                    )
 
-    async def broadcast_status(self, status_data: dict) -> None:
-        """
-        Broadcast status update to all connected clients.
-
-        Args:
-            status_data: Status information dictionary
-        """
-        message = json.dumps({"type": "status", **status_data})
-
-        # Send to all active connections
-        disconnected = set()
-        for websocket in self.active_connections:
-            try:
-                await websocket.send_text(message)
+            except WebSocketDisconnect:
+                break
             except Exception as e:
-                logger.error(f"Failed to send status to client: {e}")
-                disconnected.add(websocket)
+                logger.error(f"Error receiving message from {client.client_id}: {e}")
+                break
 
-        # Clean up disconnected clients
-        self.active_connections -= disconnected
+    def get_active_connections(self) -> int:
+        """Get number of active client connections.
+
+        Returns:
+            Number of connected clients
+        """
+        return len(self.clients)
+
+    def get_client_stats(self) -> list[dict]:
+        """Get statistics for all connected clients.
+
+        Returns:
+            List of client stat dictionaries
+        """
+        return [
+            {
+                "client_id": client.client_id,
+                "connected_at": client.connected_at,
+                "duration_sec": client.get_connection_duration(),
+                "last_chunk_seq": client.last_chunk_seq,
+                "chunks_sent": client.chunks_sent,
+            }
+            for client in self.clients.values()
+        ]
